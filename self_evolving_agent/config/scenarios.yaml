@@ -1,0 +1,103 @@
+# 场景化配置模板 —— 预定义常见使用场景
+
+scenarios:
+  # 场景1：系统监控与告警
+  system_monitor:
+    description: "监控系统资源，预测瓶颈并自动调整"
+    modules:
+      perception: default
+      prediction: default
+      drive_engine: default
+      decision: default
+      error_eval: default
+      optimizer: default
+      memory: default
+    config_overrides:
+      resource_constraints:
+        max_cpu_percent: 80
+        max_memory_percent: 85
+      drive_weights:
+        safety_weight: 0.5
+        gain_weight: 0.3
+        efficiency_weight: 0.2
+    adapters:
+      - type: log_adapter
+        watch_dir: /var/log
+        error_patterns: ["ERROR", "FATAL", "OutOfMemory"]
+      - type: action_adapter
+        http_endpoints:
+          - url: http://localhost:8080/alert
+            trigger: cpu > 80%
+
+  # 场景2：日志异常检测
+  log_anomaly_detection:
+    description: "实时分析日志文件，检测异常模式"
+    modules:
+      perception: default
+      prediction: default
+      drive_engine: default
+      decision: default
+    config_overrides:
+      safety_constraints:
+        max_error_rate: 0.05
+      evolution_constraints:
+        max_refactor_rounds: 2
+    adapters:
+      - type: log_adapter
+        watch_dir: ./logs
+        error_patterns: ["Exception", "ERROR", "CRITICAL", "Traceback"]
+
+  # 场景3：微服务健康守护
+  microservice_guardian:
+    description: "监控多个微服务，自动重启不健康服务"
+    modules:
+      perception: default
+      prediction: default
+      drive_engine: default
+      decision: default
+    config_overrides:
+      resource_constraints:
+        max_cpu_percent: 70
+        max_memory_percent: 75
+    adapters:
+      - type: action_adapter
+        scripts:
+          - path: ./scripts/restart_service.sh
+            trigger: service_unhealthy
+        command_whitelist:
+          - systemctl restart
+          - docker restart
+
+  # 场景4：开发环境自优化
+  dev_env_optimizer:
+    description: "优化开发环境资源分配，自动清理缓存"
+    modules:
+      perception: default
+      prediction: default
+      drive_engine: default
+      decision: default
+    config_overrides:
+      drive_weights:
+        safety_weight: 0.2
+        gain_weight: 0.3
+        efficiency_weight: 0.5
+    adapters:
+      - type: action_adapter
+        commands:
+          - "make clean"
+          - "docker system prune -f"
+
+  # 场景5：多Agent协作集群
+  multi_agent_cluster:
+    description: "多个Agent协作，共享学习经验"
+    modules:
+      perception: default
+      prediction: default
+      drive_engine: default
+      decision: default
+      memory: default
+    config_overrides:
+      collaboration:
+        enabled: true
+        share_interval: 60
+        message_bus: memory
