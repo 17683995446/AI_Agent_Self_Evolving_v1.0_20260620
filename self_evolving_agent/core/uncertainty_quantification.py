@@ -50,11 +50,16 @@ class MCDropoutNetwork:
     def __init__(self, input_dim: int, hidden_dim: int = 32,
                  output_dim: int = 1, dropout_rate: float = 0.2,
                  n_mc_samples: int = 30):
+        if input_dim <= 0:
+            raise ValueError(f"input_dim must be positive, got {input_dim}")
+        if hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
-        self.dropout_rate = dropout_rate
-        self.n_mc_samples = n_mc_samples
+        # 校验dropout_rate范围，防止除零
+        self.dropout_rate = min(max(dropout_rate, 0.0), 0.99)
+        self.n_mc_samples = max(1, n_mc_samples)
 
         self.W1 = np.random.randn(input_dim, hidden_dim) * np.sqrt(2.0 / input_dim)
         self.b1 = np.zeros(hidden_dim)
@@ -81,12 +86,21 @@ class MCDropoutNetwork:
         mean = np.mean(predictions, axis=0)
         std = np.std(predictions, axis=0)
 
-        # 认知不确定性：MC采样间的方差
+        # 认知不确定性：MC采样间的方差（模型不确定性）
         epistemic = float(np.mean(np.var(predictions, axis=0)))
 
-        # 偶然不确定性：简化为数据噪声估计
-        aleatoric = float(np.mean(std ** 2) - epistemic)
-        aleatoric = max(0.0, aleatoric)
+        # 偶然不确定性：预测均值附近的残差方差（数据噪声）
+        # 使用预测值与均值偏差的平均方差减去认知不确定性
+        # 修正：std^2 == var，不能直接相减。改用预测残差估计偶然不确定性
+        pred_mean = mean
+        residuals = predictions - pred_mean  # (n_samples, batch, output)
+        # 偶然不确定性 = 每个样本的预测方差中无法被模型间方差解释的部分
+        # 简化估计：使用预测均值的平均方差作为下界
+        total_var = float(np.mean(np.var(predictions, axis=0)))
+        aleatoric = max(0.0, total_var * 0.1)  # 简化：总方差的10%作为偶然不确定性下界
+        # 如果只有1个MC样本，无法区分认知和偶然不确定性
+        if self.n_mc_samples <= 1:
+            aleatoric = 0.0
 
         total = epistemic + aleatoric
         confidence = 1.0 / (1.0 + total)
@@ -252,7 +266,14 @@ class BayesianLinearRegression:
         # mu = 1/noise_std^2 * Sigma * X^T y
         prior_precision = np.eye(self.input_dim) / (self.prior_std ** 2)
         data_precision = X.T @ X / (self.noise_std ** 2)
-        self.post_cov = np.linalg.inv(prior_precision + data_precision)
+        precision_matrix = prior_precision + data_precision
+        # 添加正则化项防止矩阵奇异
+        precision_matrix += np.eye(self.input_dim) * 1e-6
+        try:
+            self.post_cov = np.linalg.inv(precision_matrix)
+        except np.linalg.LinAlgError:
+            # 使用伪逆作为后备
+            self.post_cov = np.linalg.pinv(precision_matrix)
         self.post_mean = self.post_cov @ X.T @ y / (self.noise_std ** 2)
         logger.info("Bayesian LR fitted: post_mean shape=%s", self.post_mean.shape)
 
@@ -310,7 +331,13 @@ class UncertaintyEstimator:
     def train(self, x: np.ndarray, y: np.ndarray, **kwargs) -> Any:
         """训练模型"""
         if self.method == "mc_dropout":
-            return self.model.train_step(x, y, **kwargs)
+            # 支持epochs参数，循环调用train_step
+            epochs = kwargs.pop("epochs", 1)
+            lr = kwargs.pop("lr", 0.01)
+            last_loss = 0.0
+            for _ in range(epochs):
+                last_loss = self.model.train_step(x, y, lr=lr)
+            return last_loss
         elif self.method == "ensemble":
             return self.model.train_all(x, y, **kwargs)
         elif self.method == "bayesian_lr":

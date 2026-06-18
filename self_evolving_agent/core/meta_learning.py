@@ -59,8 +59,9 @@ class TaskDistribution:
     def sample_task(self) -> Task:
         """采样一个随机分类任务"""
         self.task_counter += 1
-        # 随机选择n_classes个类别
-        selected_classes = np.random.choice(10, self.n_classes, replace=False)
+        # 随机选择n_classes个类别（池大小为n_classes*2，至少n_classes）
+        pool_size = max(self.n_classes * 2, self.n_classes)
+        selected_classes = np.random.choice(pool_size, self.n_classes, replace=False)
         # 为每个类别生成原型权重
         prototypes = np.random.randn(self.n_classes, self.input_dim)
 
@@ -195,6 +196,8 @@ class MAMLModel:
         内循环：在支持集上适应任务
         Returns: 适应后的模型
         """
+        # 保存元参数，adapt结束后恢复
+        meta_params = self.model.get_params()
         adapted = self.model.copy()
         for step in range(self.inner_steps):
             # 在支持集上计算梯度
@@ -205,6 +208,8 @@ class MAMLModel:
             for key in params:
                 params[key] -= self.inner_lr * grads[key]
             adapted.set_params(params)
+        # 恢复元参数，确保后续任务的adapt基于正确的初始参数
+        self.model.set_params(meta_params)
         return adapted
 
     def meta_loss(self, task: Task) -> Tuple[float, float]:
@@ -252,16 +257,34 @@ class MetaLearner:
         avg_loss = total_loss / batch_size
         avg_acc = total_acc / batch_size
 
-        # 简化版元梯度：使用数值梯度近似
-        # 实际实现中应使用自动微分计算二阶梯度
-        # 此处使用一阶近似：直接朝着降低平均损失的方向更新
+        # 元梯度：使用一阶近似（FOMAML）
+        # 对每个参数计算 meta_loss 对元参数的数值梯度
         eps = 1e-3
         for key in meta_params:
-            # 简化：随机扰动评估方向（实际应计算真实元梯度）
-            # 这里使用启发式：如果损失高，稍微随机调整参数
-            if avg_loss > 1.0:
-                noise = np.random.randn(*meta_params[key].shape) * self.meta_lr * 0.1
-                meta_params[key] -= noise
+            orig = meta_params[key].copy()
+            grad = np.zeros_like(orig)
+            # 采样少量维度计算梯度（降低计算量）
+            n_dims = min(orig.size, 5)  # 最多采样5个维度
+            flat_indices = np.random.choice(orig.size, n_dims, replace=False)
+            for flat_idx in flat_indices:
+                idx = np.unravel_index(flat_idx, orig.shape)
+                meta_params[key][idx] = orig[idx] + eps
+                self.maml.model.set_params(meta_params)
+                # 仅用第1个任务评估
+                loss_plus, _ = self.maml.meta_loss(tasks[0])
+
+                meta_params[key][idx] = orig[idx] - eps
+                self.maml.model.set_params(meta_params)
+                loss_minus, _ = self.maml.meta_loss(tasks[0])
+
+                grad[idx] = (loss_plus - loss_minus) / (2 * eps)
+                meta_params[key][idx] = orig[idx]
+
+            # 梯度裁剪
+            grad_norm = np.linalg.norm(grad)
+            if grad_norm > 1.0:
+                grad = grad / grad_norm
+            meta_params[key] = orig - self.meta_lr * grad
 
         self.maml.model.set_params(meta_params)
         self.step_count += 1

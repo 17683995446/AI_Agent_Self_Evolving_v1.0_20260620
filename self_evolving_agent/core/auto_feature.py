@@ -49,7 +49,7 @@ class FeatureTransformer:
         'add': lambda a, b: a + b,
         'sub': lambda a, b: a - b,
         'mul': lambda a, b: a * b,
-        'div': lambda a, b: a / (b + 1e-10),
+        'div': lambda a, b: a / (np.where(np.abs(b) < 1e-10, 1e-10, b)),
         'max': lambda a, b: np.maximum(a, b),
         'min': lambda a, b: np.minimum(a, b),
     }
@@ -58,7 +58,7 @@ class FeatureTransformer:
     UNARY_OPS = {
         'log': lambda a: np.log(np.abs(a) + 1e-10),
         'sqrt': lambda a: np.sqrt(np.abs(a)),
-        'square': lambda a: a ** 2,
+        'square': lambda a: np.clip(a, -1e154, 1e154) ** 2,
         'abs': lambda a: np.abs(a),
         'neg': lambda a: -a,
         'sigmoid': lambda a: 1.0 / (1.0 + np.exp(-np.clip(a, -500, 500))),
@@ -328,7 +328,16 @@ class FeaturePipeline:
 
     def transform(self, X: np.ndarray, feature_names: List[str]) -> np.ndarray:
         """使用已拟合的管道变换新数据"""
-        return self.selector.transform(X, feature_names)
+        # 重新生成特征（与fit时相同的生成逻辑）
+        new_X, new_names, _ = self.transformer.generate_all(
+            X, feature_names, max_features=self.max_generated)
+        if new_X.shape[1] > 0:
+            combined_X = np.hstack([X, new_X])
+            combined_names = feature_names + new_names
+        else:
+            combined_X = X
+            combined_names = feature_names
+        return self.selector.transform(combined_X, combined_names)
 
     def get_feature_importance(self) -> Dict[str, float]:
         return self.selector.get_scores()

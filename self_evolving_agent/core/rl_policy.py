@@ -157,8 +157,11 @@ class PolicyNetwork:
             entropy = 0.5 * self.action_dim * np.log(2 * np.pi * np.e * std ** 2)
             return log_probs, np.full(len(states), entropy)
 
-    def _backward(self, states: np.ndarray, actions: np.ndarray, advantages: np.ndarray) -> Dict[str, np.ndarray]:
-        """计算策略梯度 (简化版，使用数值梯度近似)"""
+    def _backward(self, states: np.ndarray, actions: np.ndarray, advantages: np.ndarray,
+                  old_log_probs: Optional[np.ndarray] = None,
+                  clip_epsilon: Optional[float] = None) -> Dict[str, np.ndarray]:
+        """计算策略梯度 (简化版，使用数值梯度近似)
+        若提供old_log_probs和clip_epsilon，使用PPO clipped surrogate梯度"""
         eps = 1e-5
         grads = {}
         for key in self.params:
@@ -169,11 +172,24 @@ class PolicyNetwork:
                 idx = it.multi_index
                 self.params[key][idx] = orig[idx] + eps
                 lp1, _ = self.evaluate(states, actions)
-                loss1 = -np.mean(lp1 * advantages)
+                if old_log_probs is not None and clip_epsilon is not None:
+                    # PPO clipped surrogate loss
+                    ratio1 = np.exp(np.clip(lp1 - old_log_probs, -20, 20))
+                    surr1 = ratio1 * advantages
+                    surr2 = np.clip(ratio1, 1 - clip_epsilon, 1 + clip_epsilon) * advantages
+                    loss1 = -np.mean(np.minimum(surr1, surr2))
+                else:
+                    loss1 = -np.mean(lp1 * advantages)
 
                 self.params[key][idx] = orig[idx] - eps
                 lp2, _ = self.evaluate(states, actions)
-                loss2 = -np.mean(lp2 * advantages)
+                if old_log_probs is not None and clip_epsilon is not None:
+                    ratio2 = np.exp(np.clip(lp2 - old_log_probs, -20, 20))
+                    surr1 = ratio2 * advantages
+                    surr2 = np.clip(ratio2, 1 - clip_epsilon, 1 + clip_epsilon) * advantages
+                    loss2 = -np.mean(np.minimum(surr1, surr2))
+                else:
+                    loss2 = -np.mean(lp2 * advantages)
 
                 grad[idx] = (loss1 - loss2) / (2 * eps)
                 self.params[key][idx] = orig[idx]
@@ -230,14 +246,18 @@ class ValueNetwork:
     def _relu(self, x: np.ndarray) -> np.ndarray:
         return np.maximum(0, x)
 
-    def predict(self, state: np.ndarray) -> float:
-        """预测单状态价值"""
+    def predict(self, state: np.ndarray):
+        """预测状态价值（支持单状态和批量）"""
         x = state
         for i in range(len(self.hidden_dims)):
             x = np.dot(x, self.params[f'W{i}']) + self.params[f'b{i}']
             x = self._relu(x)
         v = np.dot(x, self.params[f'W{len(self.hidden_dims)}']) + self.params[f'b{len(self.hidden_dims)}']
-        return float(v.squeeze())
+        result = v.squeeze()
+        # 单状态返回float，批量返回数组
+        if result.ndim == 0:
+            return float(result)
+        return result
 
     def predict_batch(self, states: np.ndarray) -> np.ndarray:
         """批量预测"""
@@ -371,7 +391,7 @@ class PPOTrainer:
         for epoch in range(self.ppo_epochs):
             # 简化版：全量更新（小批量逻辑在完整实现中扩展）
             new_log_probs, entropy = self.policy.evaluate(states, actions)
-            ratio = np.exp(new_log_probs - old_log_probs)
+            ratio = np.exp(np.clip(new_log_probs - old_log_probs, -20, 20))
 
             # Clipped surrogate objective
             surr1 = ratio * advantages
@@ -382,8 +402,10 @@ class PPOTrainer:
             entropy_bonus = -self.entropy_coef * np.mean(entropy)
             policy_loss += entropy_bonus
 
-            # 策略梯度更新 (数值近似)
-            grads = self.policy._backward(states, actions, advantages)
+            # 策略梯度更新 (使用PPO clipped surrogate梯度)
+            grads = self.policy._backward(states, actions, advantages,
+                                          old_log_probs=old_log_probs,
+                                          clip_epsilon=self.clip_epsilon)
             self.policy.apply_gradients(grads)
 
             # 价值网络更新
@@ -401,7 +423,7 @@ class PPOTrainer:
             "policy_loss": total_policy_loss / n,
             "value_loss": total_value_loss / n,
             "entropy": total_entropy / n,
-            "approx_kl": float(np.mean(np.exp(new_log_probs - old_log_probs) - 1)),
+            "approx_kl": float(np.mean(np.exp(np.clip(new_log_probs - old_log_probs, -20, 20)) - 1)),
         }
 
 
@@ -421,6 +443,7 @@ class TRPOTrainer:
         self.damping = damping
         self.cg_iters = cg_iters
         self.line_search_iters = line_search_iters
+        self.old_policy = policy.copy()  # 初始化old_policy避免AttributeError
         logger.info("TRPOTrainer initialized: max_kl=%.4f", max_kl)
 
     def _compute_kl(self, states: np.ndarray) -> float:

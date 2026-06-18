@@ -97,8 +97,9 @@ class CrossModalAligner:
                 # L2归一化
                 z1 = z1 / (np.linalg.norm(z1, axis=1, keepdims=True) + 1e-10)
                 z2 = z2 / (np.linalg.norm(z2, axis=1, keepdims=True) + 1e-10)
-                # 对比损失
+                # 对比损失（带数值稳定化）
                 sim = np.dot(z1, z2.T) / self.temperature
+                sim = sim - np.max(sim, axis=1, keepdims=True)  # 数值稳定
                 n = len(z1)
                 labels = np.arange(n)
                 loss = -np.mean(sim[np.arange(n), labels] -

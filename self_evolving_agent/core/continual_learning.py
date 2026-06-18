@@ -315,7 +315,7 @@ class ContinualLearningController:
         """
         strategy: "ewc", "replay", "ewc_replay", "progressive"
         """
-        self.input_dim = input_dim
+        self.input_dim = max(input_dim, 1)  # 防止input_dim=0导致除零
         self.output_dim = output_dim
         self.strategy = strategy
 

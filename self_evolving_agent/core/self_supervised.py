@@ -59,9 +59,10 @@ class RepresentationEncoder:
 
     def encode(self, x: np.ndarray) -> np.ndarray:
         """前向编码"""
-        h = x
+        h = np.clip(x, -1e6, 1e6)
         for i in range(len(self.hidden_dims)):
             h = self._relu(np.dot(h, self.params[f'W{i}']) + self.params[f'b{i}'])
+            h = np.clip(h, -1e6, 1e6)
         z = np.dot(h, self.params[f'W{len(self.hidden_dims)}']) + self.params[f'b{len(self.hidden_dims)}']
         return z
 
@@ -189,6 +190,10 @@ class ContrastiveLearner:
                 grad[idx] = (loss1 - loss2) / (2 * eps)
                 self.encoder.params[key][idx] = orig[idx]
                 it.iternext()
+            # 梯度裁剪防止参数爆炸
+            grad_norm = np.linalg.norm(grad)
+            if grad_norm > 1.0:
+                grad = grad / grad_norm
             self.encoder.params[key] -= lr * grad
 
         return {"contrastive_loss": loss}
@@ -233,8 +238,10 @@ class MaskedPredictor:
 
         # 仅计算被遮蔽位置的重建损失
         if mask.any():
-            diff = (reconstructed - x) ** 2
-            masked_loss = diff[mask]
+            rec_clipped = np.clip(reconstructed, -1e6, 1e6)
+            x_clipped = np.clip(x, -1e6, 1e6)
+            diff = (rec_clipped - x_clipped) ** 2
+            masked_loss = np.clip(diff[mask], 0, 1e12)
             loss = float(np.mean(masked_loss))
         else:
             loss = 0.0
@@ -337,6 +344,8 @@ class RepresentationEvaluator:
         normalized = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-10)
         # 计算所有点对距离的平方
         dists_sq = 2 - 2 * np.dot(normalized, normalized.T)
+        # 修正浮点误差导致的负值
+        dists_sq = np.maximum(dists_sq, 0)
         np.fill_diagonal(dists_sq, 0)
         # 均匀性损失：-log(E[dist^2])
         mask = dists_sq > 0

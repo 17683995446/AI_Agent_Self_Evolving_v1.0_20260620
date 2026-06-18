@@ -137,12 +137,22 @@ class AdversarialExampleGenerator:
         adv = x.copy()
         for _ in range(steps):
             grad = self._compute_gradient(adv, y)
-            # 梯度上升（最大化损失）
-            adv = adv + step_size * np.sign(grad)
+            # 梯度上升（最大化损失），根据范数选择方向
+            if budget.norm == "linf":
+                perturbation = step_size * np.sign(grad)
+            else:  # l2, l1
+                grad_norm = np.linalg.norm(grad)
+                if grad_norm > 1e-10:
+                    perturbation = step_size * grad / grad_norm
+                else:
+                    perturbation = np.zeros_like(grad)
+            adv = adv + perturbation
             # 投影回原始点的epsilon邻域
             adv = budget.clip(x, adv)
-            # 确保数值范围有效（如图像[0,1]）
-            adv = np.clip(adv, -10.0, 10.0)
+            # 数值范围裁剪（基于原始数据范围）
+            data_min = np.min(x) - budget.epsilon
+            data_max = np.max(x) + budget.epsilon
+            adv = np.clip(adv, data_min, data_max)
         return adv
 
     def generate(self, x: np.ndarray, y: np.ndarray,

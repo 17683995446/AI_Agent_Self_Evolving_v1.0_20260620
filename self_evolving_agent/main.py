@@ -115,10 +115,13 @@ class SelfEvolvingAgent:
 
                 # 2. 多层预测 —— 预测未来状态
                 logger.debug("ONLINE_LOOP", "步骤2: 多层预测", module="main")
+                _cpu = float(state_vector.get(StateKeys.CPU_PERCENT) or 0.0) * 100
+                _mem = float(state_vector.get(StateKeys.MEMORY_PERCENT) or 0.0) * 100
+                _disk = float(state_vector.get(StateKeys.DISK_PERCENT) or 0.0) * 100
                 self.prediction.update({
-                    MetricKeys.CPU: state_vector.get(StateKeys.CPU_PERCENT, 0.0) * 100,
-                    MetricKeys.MEMORY: state_vector.get(StateKeys.MEMORY_PERCENT, 0.0) * 100,
-                    MetricKeys.DISK: state_vector.get(StateKeys.DISK_PERCENT, 0.0) * 100,
+                    MetricKeys.CPU: _cpu,
+                    MetricKeys.MEMORY: _mem,
+                    MetricKeys.DISK: _disk,
                 })
                 pred_result = self.prediction.predict()
                 logger.info("ONLINE_LOOP", f"预测完成, 层={pred_result.layer}, 置信度={pred_result.confidence:.4f}",
@@ -127,9 +130,9 @@ class SelfEvolvingAgent:
                 # 3. 误差评估 —— 计算预测误差
                 logger.debug("ONLINE_LOOP", "步骤3: 误差评估", module="main")
                 actual = {
-                    MetricKeys.CPU: state_vector.get(StateKeys.CPU_PERCENT, 0.0) * 100,
-                    MetricKeys.MEMORY: state_vector.get(StateKeys.MEMORY_PERCENT, 0.0) * 100,
-                    MetricKeys.DISK: state_vector.get(StateKeys.DISK_PERCENT, 0.0) * 100,
+                    MetricKeys.CPU: _cpu,
+                    MetricKeys.MEMORY: _mem,
+                    MetricKeys.DISK: _disk,
                 }
                 error_report = self.error_eval.evaluate(pred_result.predicted_values, actual)
                 logger.info("ONLINE_LOOP", f"误差评估完成, MSE={error_report.get('mse', 0):.4f}, MAE={error_report.get('mae', 0):.4f}",
@@ -318,6 +321,12 @@ class SelfEvolvingAgent:
     @log_execution
     def stop(self):
         """停止Agent系统"""
+        # 幂等保护：防止重复调用导致资源重复释放
+        if not self.running and hasattr(self, '_stopped') and self._stopped:
+            logger.debug("AGENT_STOP", "stop()已调用过，跳过重复执行", module="main")
+            return
+        self._stopped = True
+
         logger.info("AGENT_STOP", "停止自驱Agent系统", module="main")
         self.running = False
         self._shutdown_event.set()

@@ -166,8 +166,12 @@ class CausalDiscovery:
     def partial_correlation(self, x: np.ndarray, y: np.ndarray,
                            z: Optional[np.ndarray] = None) -> float:
         """计算偏相关系数"""
+        # 零方差检查
+        if np.std(x) < 1e-10 or np.std(y) < 1e-10:
+            return 0.0
         if z is None or len(z) == 0:
-            return float(np.corrcoef(x, y)[0, 1])
+            corr = np.corrcoef(x, y)[0, 1]
+            return float(corr) if not np.isnan(corr) else 0.0
 
         # 多元回归残差
         z = np.atleast_2d(z)
@@ -296,9 +300,21 @@ class BackdoorCriterion:
 
     def _satisfies_backdoor(self, treatment: str, outcome: str,
                             adjustment_set: Set[str]) -> bool:
-        """检查调整集是否满足后门准则（简化检查）"""
-        # 简化：检查调整集中的变量不是treatment的后代（已在上层保证）
-        # 实际应检查是否能阻断所有后门路径
+        """检查调整集是否满足后门准则
+        后门准则：
+        1. 调整集中没有treatment的后代
+        2. 调整集阻断了所有从treatment到outcome的后门路径
+        """
+        # 条件1已在上层find_valid_adjustment_sets中保证
+        # 条件2：检查调整集是否包含所有混杂因素（同时是treatment和outcome祖先的变量）
+        treatment_ancestors = self.graph.get_ancestors(treatment)
+        outcome_ancestors = self.graph.get_ancestors(outcome)
+        confounders = treatment_ancestors & outcome_ancestors
+
+        # 调整集必须包含所有混杂因素
+        if not confounders.issubset(adjustment_set):
+            return False
+
         return True
 
     def estimate_ate(self, data: Dict[str, np.ndarray],
@@ -313,8 +329,11 @@ class BackdoorCriterion:
             valid_sets = self.find_valid_adjustment_sets(treatment, outcome)
             if not valid_sets:
                 # 无混杂因素，直接计算差异
-                return float(np.mean(data[outcome][data[treatment] == 1]) -
-                             np.mean(data[outcome][data[treatment] == 0]))
+                treated = data[outcome][data[treatment] == 1]
+                control = data[outcome][data[treatment] == 0]
+                if len(treated) == 0 or len(control) == 0:
+                    return 0.0  # 无数据，返回0
+                return float(np.mean(treated) - np.mean(control))
             adjustment_set = valid_sets[0]
 
         # 构建设计矩阵
