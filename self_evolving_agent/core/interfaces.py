@@ -182,11 +182,14 @@ class IErrorEvaluator(ABC):
     """误差评估接口"""
 
     @abstractmethod
-    def evaluate(self, predicted: Any, actual: Any) -> Dict[str, Any]:
+    def evaluate(self, predicted: Any, actual: Any,
+                 error_type: Any = None, model_params: Optional[int] = None) -> Dict[str, Any]:
         """评估预测误差
         Args:
             predicted: 预测值（字典或列表）
             actual: 实际值（字典或列表）
+            error_type: 误差类型（可选，默认PREDICTION）
+            model_params: 模型参数数量（可选，用于计算AIC/BIC）
         Returns:
             误差报告字典，键名遵循 ErrorReportKeys 契约
         """
@@ -200,12 +203,20 @@ class IOptimizer(ABC):
     def online_optimize(self, predicted: Dict[str, float],
                         actual: Dict[str, float],
                         error_report: Dict[str, Any]) -> Any:
-        """在线优化"""
+        """在线优化
+
+        Returns:
+            OptimizationResult 优化结果对象
+        """
         pass
 
     @abstractmethod
     def offline_optimize(self) -> Any:
-        """离线优化"""
+        """离线优化
+
+        Returns:
+            OptimizationResult 优化结果对象
+        """
         pass
 
 

@@ -1,8 +1,9 @@
 #!/bin/bash
 # 自驱Agent系统停止脚本
 
-AGENT_DIR="/workspace/self_evolving_agent"
-PID_FILE="$AGENT_DIR/agent.pid"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AGENT_DIR="${AGENT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+PID_FILE="${PID_FILE:-$AGENT_DIR/agent.pid}"
 
 echo "========================================"
 echo "自驱Agent系统 —— 停止"

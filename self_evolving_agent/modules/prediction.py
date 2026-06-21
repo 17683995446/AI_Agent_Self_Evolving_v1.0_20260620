@@ -736,3 +736,142 @@ class PredictionEngine(IPrediction):
         logger.info("ENGINE_CONFIDENCE", "置信度报告生成完成", module="prediction",
                     extra={"report": report})
         return report
+
+
+class EnhancedPredictionEngine(PredictionEngine):
+    """H4：增强预测引擎 —— 在三层预测基础上集成不确定性量化，做加权融合
+
+    第一性原理：
+    1. 单一模型有偏差，多模型集成能降低方差
+    2. 不确定性高的预测应降权，不确定性低的应升权
+    3. 在线学习应同时更新基础模型和不确定性估计
+
+    策略：三层预测结果 × (1 - 归一化不确定性) 加权融合
+    """
+
+    def __init__(self, base_window: int = 10, mid_lookback: int = 20, high_window: int = 60,
+                 use_uncertainty: bool = True) -> None:
+        super().__init__(base_window, mid_lookback, high_window)
+        self.use_uncertainty = use_uncertainty
+        self._uncertainty_estimator = None
+        self._uncertainty_fitted = False
+        # 融合权重历史（用于监控）
+        self._fusion_weights_history: deque = deque(maxlen=50)
+
+        if use_uncertainty:
+            self._init_uncertainty_estimator()
+
+    def _init_uncertainty_estimator(self):
+        """初始化不确定性估计器（基于core/uncertainty_quantification）"""
+        try:
+            from core.uncertainty_quantification import UncertaintyEstimator
+            # 输入3维（CPU/内存/磁盘），输出1维（预测误差）
+            self._uncertainty_estimator = UncertaintyEstimator(
+                input_dim=3, method="mc_dropout"
+            )
+            logger.info("ENHANCED_ENGINE", "不确定性估计器初始化完成", module="prediction")
+        except Exception as e:
+            logger.warning("ENHANCED_ENGINE", f"不确定性估计器初始化失败，降级为普通引擎: {e}", module="prediction")
+            self.use_uncertainty = False
+
+    def predict(self, layer: Optional[str] = None) -> PredictionResult:
+        """H4：增强预测 —— 多层融合 + 不确定性加权"""
+        if not self.use_uncertainty or self._uncertainty_estimator is None or not self._uncertainty_fitted:
+            # 未启用或未训练，回退到父类预测
+            return super().predict(layer)
+
+        # 获取三层预测结果
+        base_result = self.base_predictor.predict()
+        mid_result = self.mid_predictor.predict()
+        high_result = self.high_predictor.predict()
+
+        # 计算每层的不确定性（用预测值的方差作为代理）
+        layers = [("base", base_result), ("mid", mid_result), ("high", high_result)]
+        weights = {}
+        fused_values = {}
+
+        for key in self.metrics_keys:
+            values = []
+            for name, result in layers:
+                v = result.predicted_values.get(key, 0.0)
+                values.append(v)
+
+            # 不确定性 = 三层预测的标准差（越大越不确定）
+            mean_val = sum(values) / len(values)
+            variance = sum((v - mean_val) ** 2 for v in values) / len(values)
+            std = variance ** 0.5
+
+            # 用不确定性估计器修正（如果可用）
+            try:
+                input_vec = np.array([[mean_val / 100.0, std / 100.0, 0.5]])
+                uq_result = self._uncertainty_estimator.predict(input_vec)
+                epistemic = float(np.mean(uq_result.get("epistemic", [0.1])))
+            except Exception:
+                epistemic = 0.1
+
+            # 权重 = 1 / (1 + 不确定性)，归一化
+            total_unc = std + epistemic * 100
+            w_base = 1.0 / (1.0 + abs(values[0] - mean_val) + total_unc * 0.5)
+            w_mid = 1.0 / (1.0 + abs(values[1] - mean_val) + total_unc * 0.3)
+            w_high = 1.0 / (1.0 + abs(values[2] - mean_val) + total_unc * 0.2)
+            w_sum = w_base + w_mid + w_high
+            w_base, w_mid, w_high = w_base / w_sum, w_mid / w_sum, w_high / w_sum
+
+            fused = values[0] * w_base + values[1] * w_mid + values[2] * w_high
+            fused_values[key] = fused
+            weights[key] = {"base": w_base, "mid": w_mid, "high": w_high}
+
+        self._fusion_weights_history.append(weights)
+
+        # 置信度 = 1 - 归一化不确定性
+        avg_conf = (base_result.confidence + mid_result.confidence + high_result.confidence) / 3.0
+        # 不确定性越高，置信度越低
+        try:
+            input_vec = np.array([[fused_values.get(k, 50.0) / 100.0 for k in self.metrics_keys]])
+            uq_result = self._uncertainty_estimator.predict(input_vec)
+            total_unc = float(np.mean(uq_result.get("total_uncertainty", [0.2])))
+            confidence = max(0.0, min(1.0, avg_conf * (1.0 - total_unc * 0.5)))
+        except Exception:
+            confidence = avg_conf
+
+        result = PredictionResult(
+            predicted_values=fused_values,
+            confidence=confidence,
+            layer="enhanced_fusion",
+            strategy_advice=f"融合预测(base/mid/high加权)，不确定性已纳入",
+            error_history=list(self.error_history),
+        )
+        logger.info("ENHANCED_PREDICT", f"增强融合预测完成, 置信度={confidence:.4f}", module="prediction",
+                    extra={"fused_values": fused_values, "weights": weights})
+        return result
+
+    def online_learn(self, actual: Dict[str, float]) -> None:
+        """H4：在线学习 —— 同时更新基础模型和不确定性估计器"""
+        # 1. 先用父类更新三层模型
+        super().online_learn(actual)
+
+        # 2. 训练不确定性估计器
+        if self.use_uncertainty and self._uncertainty_estimator is not None:
+            try:
+                # 输入：实际指标值，输出：预测误差（作为标签）
+                actual_vec = np.array([[actual.get(k, 50.0) / 100.0 for k in self.metrics_keys]])
+                # 用最近一次预测误差作为标签
+                if self.error_history:
+                    error_label = np.array([[self.error_history[-1]]])
+                    self._uncertainty_estimator.train(actual_vec, error_label)
+                    self._uncertainty_fitted = True
+                    logger.debug("ENHANCED_LEARN", "不确定性估计器在线训练完成", module="prediction")
+            except Exception as e:
+                logger.warning("ENHANCED_LEARN", f"不确定性估计器训练失败: {e}", module="prediction")
+
+    def get_fusion_report(self) -> Dict[str, Any]:
+        """H4：获取融合权重报告"""
+        if not self._fusion_weights_history:
+            return {"enabled": self.use_uncertainty, "history_len": 0}
+        latest = self._fusion_weights_history[-1]
+        return {
+            "enabled": self.use_uncertainty,
+            "uncertainty_fitted": self._uncertainty_fitted,
+            "latest_weights": latest,
+            "history_len": len(self._fusion_weights_history),
+        }

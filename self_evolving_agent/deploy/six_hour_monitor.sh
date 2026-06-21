@@ -2,9 +2,10 @@
 # 6小时真实持续运行监控脚本
 # 每10分钟记录一次状态，共36次
 
-AGENT_DIR="/workspace/self_evolving_agent"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AGENT_DIR="${AGENT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 LOG_FILE="$AGENT_DIR/logs/six_hour_monitor.log"
-PID_FILE="$AGENT_DIR/agent.pid"
+PID_FILE="${PID_FILE:-$AGENT_DIR/agent.pid}"
 DB_PATH="$AGENT_DIR/data/agent_memory.db"
 
 mkdir -p "$AGENT_DIR/logs"

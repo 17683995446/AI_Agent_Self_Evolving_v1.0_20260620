@@ -13,7 +13,11 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-AGENT_DIR = "/workspace/self_evolving_agent"
+# 自动推断Agent根目录（允许通过环境变量AGENT_DIR覆盖）
+AGENT_DIR = os.environ.get(
+    "AGENT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
 PID_FILE = os.path.join(AGENT_DIR, "agent.pid")
 
 # 全局指标缓存

@@ -2,10 +2,11 @@
 # 6小时运行完成后自动生成报告
 # 此脚本应在Agent启动后运行，它会等待6小时然后生成报告
 
-AGENT_DIR="/workspace/self_evolving_agent"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AGENT_DIR="${AGENT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 REPORT_FILE="$AGENT_DIR/logs/six_hour_final_report.txt"
 LOG_FILE="$AGENT_DIR/logs/six_hour_run.log"
-PID_FILE="$AGENT_DIR/agent.pid"
+PID_FILE="${PID_FILE:-$AGENT_DIR/agent.pid}"
 DB_PATH="$AGENT_DIR/data/agent_memory.db"
 
 # 等待6小时

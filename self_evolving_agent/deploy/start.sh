@@ -4,10 +4,12 @@
 
 set -e
 
-AGENT_DIR="/workspace/self_evolving_agent"
-LOG_DIR="$AGENT_DIR/logs"
-DATA_DIR="$AGENT_DIR/data"
-PID_FILE="$AGENT_DIR/agent.pid"
+# 自动推断Agent根目录（允许通过环境变量AGENT_DIR覆盖）
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AGENT_DIR="${AGENT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+LOG_DIR="${LOG_DIR:-$AGENT_DIR/logs}"
+DATA_DIR="${DATA_DIR:-$AGENT_DIR/data}"
+PID_FILE="${PID_FILE:-$AGENT_DIR/agent.pid}"
 MODE="${1:-nohup}"
 
 echo "========================================"
@@ -96,8 +98,8 @@ if [ "$MODE" = "supervisor" ]; then
 fi
 
 if [ "$MODE" = "nohup" ]; then
-    # Nohup模式
-    nohup python "$AGENT_DIR/main.py" 9999999 > "$LOG_DIR/agent_deploy.log" 2>&1 &
+    # Nohup模式（使用CLI子命令，默认forever模式）
+    nohup python "$AGENT_DIR/main.py" run --forever --enable-multi-agent --enable-forever --rest-port "${AGENT_REST_PORT:-9090}" --dashboard-port "${AGENT_DASHBOARD_PORT:-8080}" > "$LOG_DIR/agent_deploy.log" 2>&1 &
     AGENT_PID=$!
     echo $AGENT_PID > "$PID_FILE"
     echo "Nohup模式启动完成 (PID: $AGENT_PID)"

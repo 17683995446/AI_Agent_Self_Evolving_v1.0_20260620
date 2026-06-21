@@ -1,10 +1,11 @@
 #!/bin/bash
 # 自驱Agent系统状态检查脚本
 
-AGENT_DIR="/workspace/self_evolving_agent"
-PID_FILE="$AGENT_DIR/agent.pid"
-LOG_DIR="$AGENT_DIR/logs"
-DATA_DIR="$AGENT_DIR/data"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AGENT_DIR="${AGENT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+PID_FILE="${PID_FILE:-$AGENT_DIR/agent.pid}"
+LOG_DIR="${LOG_DIR:-$AGENT_DIR/logs}"
+DATA_DIR="${DATA_DIR:-$AGENT_DIR/data}"
 
 echo "========================================"
 echo "自驱Agent系统 —— 运行状态"

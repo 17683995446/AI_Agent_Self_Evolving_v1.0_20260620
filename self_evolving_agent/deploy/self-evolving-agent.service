@@ -1,0 +1,54 @@
+# 自驱永续进化Agent系统 —— systemd 服务单元
+# U4：系统级部署，开机自启、崩溃自动重启
+#
+# 安装方法：
+#   sudo cp deploy/self-evolving-agent.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable self-evolving-agent
+#   sudo systemctl start self-evolving-agent
+#
+# 查看状态：sudo systemctl status self-evolving-agent
+# 查看日志：sudo journalctl -u self-evolving-agent -f
+
+[Unit]
+Description=Self-Evolving Agent (自驱永续进化预测修正Agent系统)
+Documentation=https://github.com/self-evolving-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${SERVICE_USER:-root}
+Group=${SERVICE_GROUP:-root}
+
+# 工作目录与可执行文件（可通过环境变量覆盖）
+WorkingDirectory=${AGENT_DIR:-/opt/self-evolving-agent}
+ExecStart=${PYTHON_BIN:-/usr/bin/python3} ${AGENT_DIR:-/opt/self-evolving-agent}/main.py run --forever --enable-multi-agent --enable-forever --rest-port ${AGENT_REST_PORT:-9090} --dashboard-port ${AGENT_DASHBOARD_PORT:-8080}
+
+# 环境变量
+Environment=PYTHONPATH=${AGENT_DIR:-/opt/self-evolving-agent}
+Environment=AGENT_CONFIG=${AGENT_DIR:-/opt/self-evolving-agent}/config/agent.yaml
+Environment=AGENT_ENV=prod
+
+# 重启策略
+Restart=on-failure
+RestartSec=10s
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# 资源限制
+LimitNOFILE=65536
+MemoryMax=2G
+CPUQuota=200%
+
+# 优雅停止
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+# 标准输出/错误重定向到 journalctl
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=self-evolving-agent
+
+[Install]
+WantedBy=multi-user.target

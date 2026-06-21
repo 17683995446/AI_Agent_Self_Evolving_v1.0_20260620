@@ -196,7 +196,9 @@ class RESTHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Permission denied"}, 403)
             return
         if _agent_instance is None:
-            self._send_json({"error": "Agent not initialized"}, 503)
+            self._send_json({"error": {"code": "AGENT_NOT_INITIALIZED",
+                                       "message": "Agent未初始化",
+                                       "remediation": "通过set_agent()注入Agent实例"}}, 503)
             return
         try:
             action_name = payload.get("action", "sleep")
@@ -209,7 +211,13 @@ class RESTHandler(BaseHTTPRequestHandler):
                 "release": ActionType.RELEASE_RESOURCES,
                 "learn": ActionType.LEARN,
             }
-            atype = action_map.get(action_name, ActionType.SLEEP)
+            # U2：未知动作返回400而非静默映射为SLEEP
+            if action_name not in action_map:
+                self._send_json({"error": {"code": "UNKNOWN_ACTION",
+                                           "message": f"未知动作: {action_name}",
+                                           "remediation": f"合法动作: {list(action_map.keys())}"}}, 400)
+                return
+            atype = action_map[action_name]
             action = Action(atype, action_name, "API调用")
             result = _agent_instance.decision.executor.execute(action)
             self._send_json({
@@ -225,26 +233,47 @@ class RESTHandler(BaseHTTPRequestHandler):
 
     def _handle_reload_config(self, token: str, payload: Dict[str, Any]):
         if not _permission_manager.check_permission(token, "reload_config"):
-            self._send_json({"error": "Permission denied"}, 403)
+            self._send_json({"error": {"code": "PERMISSION_DENIED",
+                                       "message": "权限不足",
+                                       "remediation": "使用具有reload_config权限的令牌"}}, 403)
             return
         try:
             from core.config import config_manager
-            config_manager.reload()
+            # U2：修复reload断裂 —— ConfigManager没有reload()方法，使用load()
+            config_manager.load()
             self._send_json({"status": "ok", "message": "配置已重载"})
         except Exception as e:
-            self._send_json({"error": str(e)}, 500)
+            self._send_json({"error": {"code": "CONFIG_RELOAD_FAILED",
+                                       "message": str(e),
+                                       "remediation": "检查config/agent.yaml格式是否正确"}}, 500)
 
 
-def start_rest_server(port: int = 9090):
-    """启动REST API服务器"""
+def start_rest_server(port: int = 9090, block: bool = True):
+    """启动REST API服务器
+
+    U2：支持非阻塞模式，便于main.py集成
+
+    Args:
+        port: 监听端口
+        block: 是否阻塞主线程。False时在后台线程启动
+    """
     set_default_tokens()
     server = HTTPServer(("0.0.0.0", port), RESTHandler)
     logger.info("REST_API", f"REST API启动于 http://0.0.0.0:{port}", module="rest_api")
-    logger.info("REST_API", "默认令牌: read_token, execute_token, admin_token", module="rest_api")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        server.shutdown()
+
+    if block:
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            server.shutdown()
+    else:
+        import threading
+        thread = threading.Thread(target=server.serve_forever, name="RESTServer", daemon=True)
+        thread.start()
+        logger.info("REST_API", "REST API在后台线程运行", module="rest_api")
+        return server
+
+    return server
 
 
 if __name__ == "__main__":

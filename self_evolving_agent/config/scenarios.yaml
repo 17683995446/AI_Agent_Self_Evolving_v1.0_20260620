@@ -17,9 +17,9 @@ scenarios:
         max_cpu_percent: 80
         max_memory_percent: 85
       drive_weights:
-        safety_weight: 0.5
-        gain_weight: 0.3
-        efficiency_weight: 0.2
+        safe: 0.5
+        gain: 0.3
+        eff: 0.2
     adapters:
       - type: log_adapter
         watch_dir: /var/log
@@ -38,10 +38,10 @@ scenarios:
       drive_engine: default
       decision: default
     config_overrides:
-      safety_constraints:
-        max_error_rate: 0.05
-      evolution_constraints:
-        max_refactor_rounds: 2
+      safety:
+        max_consecutive_exploration_failures: 3
+      evolution:
+        exploration_ratio: 0.4
     adapters:
       - type: log_adapter
         watch_dir: ./logs
@@ -78,9 +78,9 @@ scenarios:
       decision: default
     config_overrides:
       drive_weights:
-        safety_weight: 0.2
-        gain_weight: 0.3
-        efficiency_weight: 0.5
+        safe: 0.2
+        gain: 0.3
+        eff: 0.5
     adapters:
       - type: action_adapter
         commands:

@@ -23,6 +23,7 @@ if __name__ == "__main__":
 from core.logger import logger, log_execution
 from core.config import config_manager
 from core.interfaces import IErrorEvaluator, ErrorReportKeys
+from core.exceptions import ErrorEvalException
 
 
 class ErrorType(Enum):
@@ -289,7 +290,7 @@ class ErrorEvaluator(IErrorEvaluator):
                     extra={"pred_len": len(predicted), "actual_len": len(actual)})
         if len(predicted) != len(actual) or len(predicted) == 0:
             logger.error("EVAL_MSE", "预测值和真实值长度不匹配或为空", module="error_eval")
-            raise ValueError("预测值和真实值长度必须相同且非空")
+            raise ErrorEvalException("预测值和真实值长度必须相同且非空")
         mse = float(np.mean([(p - a) ** 2 for p, a in zip(predicted, actual)]))
         logger.info("EVAL_MSE", "MSE计算完成", module="error_eval",
                     extra={"mse": mse})
@@ -302,7 +303,7 @@ class ErrorEvaluator(IErrorEvaluator):
                     extra={"pred_len": len(predicted), "actual_len": len(actual)})
         if len(predicted) != len(actual) or len(predicted) == 0:
             logger.error("EVAL_MAE", "预测值和真实值长度不匹配或为空", module="error_eval")
-            raise ValueError("预测值和真实值长度必须相同且非空")
+            raise ErrorEvalException("预测值和真实值长度必须相同且非空")
         mae = float(np.mean([abs(p - a) for p, a in zip(predicted, actual)]))
         logger.info("EVAL_MAE", "MAE计算完成", module="error_eval",
                     extra={"mae": mae})
@@ -315,7 +316,7 @@ class ErrorEvaluator(IErrorEvaluator):
                     extra={"pred_len": len(predicted), "actual_len": len(actual)})
         if len(predicted) != len(actual) or len(predicted) == 0:
             logger.error("EVAL_REL", "预测值和真实值长度不匹配或为空", module="error_eval")
-            raise ValueError("预测值和真实值长度必须相同且非空")
+            raise ErrorEvalException("预测值和真实值长度必须相同且非空")
         rel_errors = [abs(p - a) / max(abs(a), eps) for p, a in zip(predicted, actual)]
         logger.info("EVAL_REL", "相对误差计算完成", module="error_eval",
                     extra={"count": len(rel_errors), "mean_rel_error": float(np.mean(rel_errors))})

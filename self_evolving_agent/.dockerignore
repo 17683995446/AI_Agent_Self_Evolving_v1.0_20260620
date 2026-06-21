@@ -1,0 +1,32 @@
+# 构建上下文排除清单 —— 减小Docker镜像构建上下文体积
+.git/
+.gitignore
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 测试与开发产物
+tests/
+scripts/
+docs/
+
+# 运行时数据（容器内会重新创建）
+logs/
+data/snapshots/
+*.pkl
+*.db
+*.pid
+
+# IDE与系统文件
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# Docker自身文件
+Dockerfile
+docker-compose.yml
+.dockerignore

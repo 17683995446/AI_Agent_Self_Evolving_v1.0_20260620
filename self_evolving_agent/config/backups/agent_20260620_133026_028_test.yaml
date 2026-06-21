@@ -1,0 +1,23 @@
+resource:
+  max_cpu_percent: 20.0
+  max_memory_percent: 20.0
+  max_reconstruction_iterations: 3
+  storage_retain_ratio: 0.30
+
+evolution:
+  exploration_ratio: 0.30
+  idle_replay_interval_hours: 6.0
+  steady_state_error_threshold: 0.01
+  exploration_boost_on_steady: 0.10
+
+drive_weights:
+  safe: 0.4
+  gain: 0.4
+  eff: 0.2
+
+main_loop_frequency: 1.0
+perception_interval: 1.0
+decision_interval: 1.0
+log_dir: "./logs"
+database_path: "./data/agent_memory.db"
+model_snapshot_dir: "./data/snapshots"

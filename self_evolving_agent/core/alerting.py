@@ -143,6 +143,195 @@ class ScriptChannel(AlertChannel):
             return False
 
 
+class DingTalkChannel(AlertChannel):
+    """钉钉机器人通道 —— 通过webhook发送markdown格式告警"""
+
+    def __init__(self, webhook_url: str, secret: str = "", timeout_sec: float = 5.0):
+        self.webhook_url = webhook_url
+        self.secret = secret
+        self.timeout_sec = timeout_sec
+
+    def _build_payload(self, event: AlertEvent) -> Dict[str, Any]:
+        """构造钉钉消息体（markdown格式）"""
+        level_emoji = {"info": "ℹ️", "warning": "⚠️", "error": "❌", "critical": "🚨"}
+        emoji = level_emoji.get(event.level.value, "⚠️")
+        title = f"{emoji} Agent告警 [{event.level.value.upper()}]"
+        text = (
+            f"### {title}\n\n"
+            f"- **规则**: {event.rule_name}\n"
+            f"- **消息**: {event.message}\n"
+            f"- **指标值**: {event.metric_value}\n"
+            f"- **阈值**: {event.threshold}\n"
+            f"- **时间**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(event.timestamp))}\n"
+        )
+        return {"msgtype": "markdown", "markdown": {"title": title, "text": text}}
+
+    def send(self, event: AlertEvent, context: Optional[Dict[str, Any]] = None) -> bool:
+        try:
+            import urllib.request
+            url = self.webhook_url
+            # 钉钉签名（如果配置了secret）
+            if self.secret:
+                import hmac
+                import hashlib
+                import base64
+                import urllib.parse
+                timestamp = str(round(time.time() * 1000))
+                string_to_sign = f"{timestamp}\n{self.secret}"
+                hmac_code = hmac.new(
+                    self.secret.encode("utf-8"),
+                    string_to_sign.encode("utf-8"),
+                    digestmod=hashlib.sha256,
+                ).digest()
+                sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+                url = f"{self.webhook_url}&timestamp={timestamp}&sign={sign}"
+
+            payload = self._build_payload(event)
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                return result.get("errcode") == 0
+        except Exception as e:
+            logger.warning("ALERT", f"钉钉告警发送失败: {e}", module="alerting")
+            return False
+
+
+class FeishuChannel(AlertChannel):
+    """飞书机器人通道 —— 通过webhook发送交互卡片告警"""
+
+    def __init__(self, webhook_url: str, secret: str = "", timeout_sec: float = 5.0):
+        self.webhook_url = webhook_url
+        self.secret = secret
+        self.timeout_sec = timeout_sec
+
+    def _build_payload(self, event: AlertEvent) -> Dict[str, Any]:
+        """构造飞书消息体（交互卡片）"""
+        level_color = {"info": "blue", "warning": "orange", "error": "red", "critical": "red"}
+        color = level_color.get(event.level.value, "orange")
+        return {
+            "msg_type": "interactive",
+            "card": {
+                "header": {
+                    "title": {"tag": "plain_text", "content": f"Agent告警 [{event.level.value.upper()}]"},
+                    "template": color,
+                },
+                "elements": [
+                    {"tag": "div", "text": {"tag": "lark_md", "content": f"**规则**: {event.rule_name}"}},
+                    {"tag": "div", "text": {"tag": "lark_md", "content": f"**消息**: {event.message}"}},
+                    {"tag": "div", "text": {"tag": "lark_md", "content": f"**指标值**: {event.metric_value} / **阈值**: {event.threshold}"}},
+                    {"tag": "div", "text": {"tag": "lark_md", "content": f"**时间**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(event.timestamp))}"}},
+                ],
+            },
+        }
+
+    def send(self, event: AlertEvent, context: Optional[Dict[str, Any]] = None) -> bool:
+        try:
+            import urllib.request
+            payload = self._build_payload(event)
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                self.webhook_url, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                return result.get("code") == 0 or result.get("StatusCode") == 0
+        except Exception as e:
+            logger.warning("ALERT", f"飞书告警发送失败: {e}", module="alerting")
+            return False
+
+
+class WeComChannel(AlertChannel):
+    """企业微信机器人通道 —— 通过webhook发送markdown告警"""
+
+    def __init__(self, webhook_url: str, timeout_sec: float = 5.0):
+        self.webhook_url = webhook_url
+        self.timeout_sec = timeout_sec
+
+    def _build_payload(self, event: AlertEvent) -> Dict[str, Any]:
+        """构造企业微信消息体（markdown）"""
+        level_tag = {"info": "info", "warning": "warning", "error": "error", "critical": "critical"}
+        color = level_tag.get(event.level.value, "warning")
+        content = (
+            f"<font color=\"{color}\">Agent告警 [{event.level.value.upper()}]</font>\n"
+            f">规则: {event.rule_name}\n"
+            f">消息: {event.message}\n"
+            f">指标值: {event.metric_value}\n"
+            f">阈值: {event.threshold}\n"
+            f">时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(event.timestamp))}"
+        )
+        return {"msgtype": "markdown", "markdown": {"content": content}}
+
+    def send(self, event: AlertEvent, context: Optional[Dict[str, Any]] = None) -> bool:
+        try:
+            import urllib.request
+            payload = self._build_payload(event)
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                self.webhook_url, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                return result.get("errcode") == 0
+        except Exception as e:
+            logger.warning("ALERT", f"企业微信告警发送失败: {e}", module="alerting")
+            return False
+
+
+class EmailChannel(AlertChannel):
+    """邮件通道 —— 通过SMTP发送告警邮件"""
+
+    def __init__(self, smtp_host: str, smtp_port: int, username: str,
+                 password: str, from_addr: str, to_addrs: List[str],
+                 use_tls: bool = True):
+        self.smtp_host = smtp_host
+        self.smtp_port = smtp_port
+        self.username = username
+        self.password = password
+        self.from_addr = from_addr
+        self.to_addrs = to_addrs if isinstance(to_addrs, list) else [to_addrs]
+        self.use_tls = use_tls
+
+    def send(self, event: AlertEvent, context: Optional[Dict[str, Any]] = None) -> bool:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            from email.mime.multipart import MIMEMultipart
+
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"[Agent告警-{event.level.value.upper()}] {event.rule_name}"
+            msg["From"] = self.from_addr
+            msg["To"] = ", ".join(self.to_addrs)
+
+            html = (
+                f"<h2>Agent告警 [{event.level.value.upper()}]</h2>"
+                f"<p><b>规则:</b> {event.rule_name}</p>"
+                f"<p><b>消息:</b> {event.message}</p>"
+                f"<p><b>指标值:</b> {event.metric_value}</p>"
+                f"<p><b>阈值:</b> {event.threshold}</p>"
+                f"<p><b>时间:</b> {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(event.timestamp))}</p>"
+            )
+            msg.attach(MIMEText(html, "html", "utf-8"))
+
+            with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=10) as server:
+                if self.use_tls:
+                    server.starttls()
+                server.login(self.username, self.password)
+                server.sendmail(self.from_addr, self.to_addrs, msg.as_string())
+            return True
+        except Exception as e:
+            logger.warning("ALERT", f"邮件告警发送失败: {e}", module="alerting")
+            return False
+
+
 class AlertManager:
     """告警管理器 —— 规则匹配、状态跟踪、多渠道分发"""
 
@@ -264,6 +453,84 @@ class AlertManager:
         self._history.append(event)
         if len(self._history) > self._max_history:
             self._history.pop(0)
+
+    def dispatch(self, event: AlertEvent, context: Optional[Dict[str, Any]] = None) -> None:
+        """H3新增：公开的告警分发接口，供外部直接触发告警
+
+        与_dispatch的区别：不依赖rule存在，直接向所有已注册通道分发
+        """
+        logger.info("ALERT", f"分发告警: [{event.level.value}] {event.message}", module="alerting",
+                    extra={"rule": event.rule_name, "channels": list(self._channels.keys())})
+        for channel_name, channel in self._channels.items():
+            try:
+                channel.send(event, context)
+            except Exception as e:
+                logger.warning("ALERT", f"通道 {channel_name} 发送失败: {e}", module="alerting")
+        self._history.append(event)
+        if len(self._history) > self._max_history:
+            self._history.pop(0)
+
+    @staticmethod
+    def create_channel_from_config(config: Dict[str, Any]) -> Optional[AlertChannel]:
+        """H3新增：从配置字典创建通道实例
+
+        配置格式:
+            {"type": "dingtalk", "webhook_url": "...", "secret": "..."}
+            {"type": "feishu", "webhook_url": "...", "secret": "..."}
+            {"type": "wecom", "webhook_url": "..."}
+            {"type": "email", "smtp_host": "...", "smtp_port": 465, ...}
+            {"type": "http", "webhook_url": "..."}
+        """
+        ctype = config.get("type", "")
+        if ctype == "dingtalk":
+            return DingTalkChannel(
+                webhook_url=config.get("webhook_url", ""),
+                secret=config.get("secret", ""),
+                timeout_sec=config.get("timeout", 5.0),
+            )
+        elif ctype == "feishu":
+            return FeishuChannel(
+                webhook_url=config.get("webhook_url", ""),
+                secret=config.get("secret", ""),
+                timeout_sec=config.get("timeout", 5.0),
+            )
+        elif ctype == "wecom":
+            return WeComChannel(
+                webhook_url=config.get("webhook_url", ""),
+                timeout_sec=config.get("timeout", 5.0),
+            )
+        elif ctype == "email":
+            return EmailChannel(
+                smtp_host=config.get("smtp_host", ""),
+                smtp_port=config.get("smtp_port", 465),
+                username=config.get("username", ""),
+                password=config.get("password", ""),
+                from_addr=config.get("from_addr", ""),
+                to_addrs=config.get("to_addrs", []),
+                use_tls=config.get("use_tls", True),
+            )
+        elif ctype == "http":
+            return HTTPChannel(
+                webhook_url=config.get("webhook_url", ""),
+                timeout_sec=config.get("timeout", 5.0),
+            )
+        logger.warning("ALERT", f"未知通道类型: {ctype}", module="alerting")
+        return None
+
+    def setup_channels_from_config(self, channels_config: List[Dict[str, Any]]) -> int:
+        """H3新增：从配置列表批量创建通道并注册
+
+        Returns: 成功创建的通道数
+        """
+        count = 0
+        for cfg in channels_config:
+            channel = self.create_channel_from_config(cfg)
+            if channel is not None:
+                name = cfg.get("name", cfg.get("type", f"channel_{count}"))
+                self.add_channel(name, channel)
+                count += 1
+        logger.info("ALERT", f"从配置创建 {count} 个告警通道", module="alerting")
+        return count
 
     def get_history(self, limit: int = 100) -> List[AlertEvent]:
         """获取告警历史"""

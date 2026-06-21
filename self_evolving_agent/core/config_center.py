@@ -17,7 +17,9 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# O6：统一sys.path策略 —— 仅在直接运行时添加路径（避免import副作用）
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.logger import logger
 from core.config import SystemConfig, ConfigManager, ResourceConstraints, SafetyConstraints, EvolutionConstraints, DriveWeights
 

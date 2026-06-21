@@ -237,14 +237,67 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def start_dashboard_server(port: int = 8080):
-    """启动仪表板服务器"""
+def start_dashboard_server(port: int = 8080, block: bool = True):
+    """启动仪表板服务器
+
+    U3：支持非阻塞模式，便于main.py集成
+
+    Args:
+        port: 监听端口
+        block: 是否阻塞主线程。False时在后台线程启动
+    """
     server = HTTPServer(("0.0.0.0", port), DashboardHandler)
     logger.info("DASHBOARD", f"监控面板启动于 http://0.0.0.0:{port}", module="dashboard")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        server.shutdown()
+
+    if block:
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            server.shutdown()
+    else:
+        import threading
+        thread = threading.Thread(target=server.serve_forever, name="DashboardServer", daemon=True)
+        thread.start()
+        logger.info("DASHBOARD", "监控面板在后台线程运行", module="dashboard")
+        return server
+
+    return server
+
+
+class DashboardServer:
+    """U3：Dashboard服务器封装类，便于生命周期管理"""
+
+    def __init__(self, port: int = 8080):
+        self.port = port
+        self._server: HTTPServer = None
+        self._thread: threading.Thread = None
+
+    def start(self) -> None:
+        """启动Dashboard服务器（非阻塞）"""
+        if self._server is not None:
+            return
+        self._server = HTTPServer(("0.0.0.0", self.port), DashboardHandler)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            name="DashboardServer",
+            daemon=True
+        )
+        self._thread.start()
+        logger.info("DASHBOARD", f"监控面板启动于 http://0.0.0.0:{self.port}", module="dashboard")
+
+    def stop(self) -> None:
+        """停止Dashboard服务器"""
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+            self._thread = None
+            logger.info("DASHBOARD", "监控面板已停止", module="dashboard")
+
+    @property
+    def running(self) -> bool:
+        """是否正在运行"""
+        return self._server is not None
 
 
 if __name__ == "__main__":

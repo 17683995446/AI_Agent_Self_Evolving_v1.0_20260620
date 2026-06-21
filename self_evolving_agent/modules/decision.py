@@ -1,15 +1,19 @@
 """
 自主决策模块 —— 基于驱力引擎输出和状态向量进行自主决策
 包含动作空间定义、策略选择、动作执行与资源边界检查
+
+H1阶段升级：动作执行从time.sleep空壳改为真实调用ExternalActionAdapter
 """
 import os
 import sys
 import time
 import random
+import shutil
+import tempfile
 import psutil
 from enum import Enum, auto
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Callable
+from typing import Dict, List, Any, Optional, Callable, Union, Tuple
 from collections import deque
 
 # 仅在直接运行时添加路径（避免副作用）
@@ -31,6 +35,11 @@ class ActionType(Enum):
     RELEASE_RESOURCES = auto()
     PREDICT = auto()
     LEARN = auto()
+    # H1新增：真实运维动作
+    CLEAN_CACHE = auto()       # 清理缓存（临时文件/包管理器缓存）
+    RESTART_SERVICE = auto()   # 重启指定服务
+    ALERT_NOTIFY = auto()      # 触发外部告警通知
+    KILL_PROCESS = auto()      # 终止高资源占用进程
 
 
 @dataclass
@@ -152,6 +161,31 @@ class ActionSpace:
             priority=2,
         ))
         logger.debug("ACTION_SPACE_INIT", "注册动作: 学习", module="decision")
+        # H1新增真实运维动作
+        self.actions.append(Action(
+            action_type=ActionType.CLEAN_CACHE,
+            name="清理缓存",
+            description="清理临时文件和包管理器缓存",
+            priority=1,
+        ))
+        self.actions.append(Action(
+            action_type=ActionType.RESTART_SERVICE,
+            name="重启服务",
+            description="重启指定不健康的服务",
+            priority=3,
+        ))
+        self.actions.append(Action(
+            action_type=ActionType.ALERT_NOTIFY,
+            name="告警通知",
+            description="向外部系统发送告警通知",
+            priority=3,
+        ))
+        self.actions.append(Action(
+            action_type=ActionType.KILL_PROCESS,
+            name="终止进程",
+            description="终止高资源占用进程",
+            priority=2,
+        ))
         logger.info("ACTION_SPACE_INIT", f"共注册 {len(self.actions)} 个动作", module="decision")
 
     @log_execution
@@ -287,19 +321,48 @@ class Policy:
 
 
 class ActionExecutor:
-    """动作执行器 —— 负责执行选定的动作并返回结果"""
+    """动作执行器 —— 负责执行选定的动作并返回结果
 
-    def __init__(self) -> None:
+    H1升级：引入ExternalActionAdapter，动作真实落地执行
+    """
+
+    # 动作类型 -> 安全命令映射（白名单，避免任意命令注入）
+    DEFAULT_CLEAN_CACHE_TARGETS = [
+        "/tmp/agent_cache_*",   # Agent自身临时缓存
+    ]
+
+    def __init__(self, action_adapter: Optional[Any] = None,
+                 allowed_services: Optional[List[str]] = None,
+                 allowed_kill_patterns: Optional[List[str]] = None) -> None:
         logger.info("EXECUTOR_INIT", "初始化动作执行器", module="decision")
         self.config = config_manager.config
         self.resource = self.config.resource
         self.execution_history = deque(maxlen=1000)
         self.recent_tasks_completed = 0
         self.recent_tasks_failed = 0
-        logger.info("EXECUTOR_INIT", "动作执行器初始化完成", module="decision")
+
+        # H1：接入外部动作适配器（真实执行命令/HTTP/脚本）
+        # 延迟导入避免循环依赖
+        try:
+            from adapters.action_adapter import ExternalActionAdapter
+            self.adapter = action_adapter or ExternalActionAdapter(timeout=10.0)
+        except Exception as e:
+            logger.warning("EXECUTOR_INIT", f"外部适配器加载失败，降级为内置执行: {e}", module="decision")
+            self.adapter = None
+
+        # 安全白名单：只允许重启这些服务、只允许kill这些进程名
+        self.allowed_services = allowed_services or []
+        self.allowed_kill_patterns = allowed_kill_patterns or []
+        # 累计清理字节数（统计指标）
+        self.total_cache_cleaned_bytes = 0
+        # 动作回调表：main.py注入真实模块方法，使内部动作能调用真实模块
+        self._callbacks: Dict[str, Callable] = {}
+        logger.info("EXECUTOR_INIT", "动作执行器初始化完成", module="decision",
+                    extra={"has_adapter": self.adapter is not None,
+                           "allowed_services": len(self.allowed_services)})
 
     @log_execution
-    def check_resource_boundaries(self) -> tuple[bool, str]:
+    def check_resource_boundaries(self) -> Tuple[bool, str]:
         """刚性边界检查：CPU/内存是否超过20%"""
         logger.debug("EXECUTOR_CHECK", "开始资源边界检查", module="decision")
         cpu_percent = psutil.cpu_percent(interval=0.1)
@@ -414,33 +477,59 @@ class ActionExecutor:
 
     @log_execution
     def _execute_action_logic(self, action: Action) -> None:
-        """执行具体动作逻辑"""
+        """执行具体动作逻辑
+
+        H1升级：每个动作真实落地执行，不再使用time.sleep空壳
+        - 内部动作（采集/预测/学习/调参）：调用对应模块的真实方法（通过回调注入）
+        - 运维动作（清理缓存/重启服务/告警/kill进程）：通过ExternalActionAdapter真实执行
+        """
         logger.debug("EXECUTOR_LOGIC", f"执行动作逻辑: {action.name}", module="decision",
                     extra={"action_type": action.action_type.name})
 
-        if action.action_type == ActionType.COLLECT_DATA:
-            logger.info("EXECUTOR_LOGIC", "执行采集数据逻辑", module="decision")
-            time.sleep(0.01)
-            logger.debug("EXECUTOR_LOGIC", "采集数据逻辑完成", module="decision")
-        elif action.action_type == ActionType.ADJUST_MODEL:
-            logger.info("EXECUTOR_LOGIC", "执行调整模型逻辑", module="decision")
-            time.sleep(0.02)
-            logger.debug("EXECUTOR_LOGIC", "调整模型逻辑完成", module="decision")
-        elif action.action_type == ActionType.OPTIMIZE_PARAMS:
-            logger.info("EXECUTOR_LOGIC", "执行优化参数逻辑", module="decision")
-            time.sleep(0.015)
-            logger.debug("EXECUTOR_LOGIC", "优化参数逻辑完成", module="decision")
-        elif action.action_type == ActionType.SAVE_SNAPSHOT:
-            logger.info("EXECUTOR_LOGIC", "执行保存快照逻辑", module="decision")
+        at = action.action_type
+
+        if at == ActionType.COLLECT_DATA:
+            # 真实采集：触发一次psutil采样并记录
+            cpu = psutil.cpu_percent(interval=0.05)
+            mem = psutil.virtual_memory().percent
+            logger.info("EXECUTOR_LOGIC", f"采集数据完成: CPU={cpu:.1f}% MEM={mem:.1f}%", module="decision")
+
+        elif at == ActionType.ADJUST_MODEL:
+            # 真实调整：调用注入的模型调整回调（若有），否则记录调参意图
+            cb = self._callbacks.get("adjust_model")
+            if cb:
+                cb(action.params)
+                logger.info("EXECUTOR_LOGIC", "模型调整回调已执行", module="decision")
+            else:
+                logger.info("EXECUTOR_LOGIC", "模型调整：无回调，记录意图", module="decision")
+
+        elif at == ActionType.OPTIMIZE_PARAMS:
+            cb = self._callbacks.get("optimize_params")
+            if cb:
+                cb(action.params)
+                logger.info("EXECUTOR_LOGIC", "参数优化回调已执行", module="decision")
+            else:
+                logger.info("EXECUTOR_LOGIC", "参数优化：无回调，记录意图", module="decision")
+
+        elif at == ActionType.SAVE_SNAPSHOT:
+            # 真实保存快照到磁盘
             snapshot_dir = self.config.model_snapshot_dir
             os.makedirs(snapshot_dir, exist_ok=True)
-            logger.debug("EXECUTOR_LOGIC", f"快照目录确认存在: {snapshot_dir}", module="decision")
-            time.sleep(0.01)
-            logger.debug("EXECUTOR_LOGIC", "保存快照逻辑完成", module="decision")
-        elif action.action_type == ActionType.SLEEP:
-            logger.info("EXECUTOR_LOGIC", "执行休眠逻辑", module="decision")
+            ts = int(time.time())
+            snapshot_path = os.path.join(snapshot_dir, f"action_snapshot_{ts}.pkl")
+            import pickle
+            snapshot_data = {
+                "timestamp": ts,
+                "action": action.name,
+                "cpu_percent": psutil.cpu_percent(interval=0.05),
+                "memory_percent": psutil.virtual_memory().percent,
+            }
+            with open(snapshot_path, "wb") as f:
+                pickle.dump(snapshot_data, f)
+            logger.info("EXECUTOR_LOGIC", f"快照已保存: {snapshot_path}", module="decision")
+
+        elif at == ActionType.SLEEP:
             sleep_duration = action.params.get("duration", 1.0)
-            # 参数校验：防止负数或超大值
             if not isinstance(sleep_duration, (int, float)):
                 logger.warning("EXECUTOR_LOGIC", f"休眠时长类型异常: {type(sleep_duration)}，使用默认值1.0", module="decision")
                 sleep_duration = 1.0
@@ -448,26 +537,213 @@ class ActionExecutor:
             logger.debug("EXECUTOR_LOGIC", f"休眠时长: {sleep_duration}s", module="decision")
             time.sleep(sleep_duration)
             logger.debug("EXECUTOR_LOGIC", "休眠逻辑完成", module="decision")
-        elif action.action_type == ActionType.REDUCE_COLLECT_FREQ:
-            logger.info("EXECUTOR_LOGIC", "执行降低采集频率逻辑", module="decision")
-            time.sleep(0.005)
-            logger.debug("EXECUTOR_LOGIC", "降低采集频率逻辑完成", module="decision")
-        elif action.action_type == ActionType.RELEASE_RESOURCES:
-            logger.info("EXECUTOR_LOGIC", "执行释放资源逻辑", module="decision")
-            time.sleep(0.005)
-            logger.debug("EXECUTOR_LOGIC", "释放资源逻辑完成", module="decision")
-        elif action.action_type == ActionType.PREDICT:
-            logger.info("EXECUTOR_LOGIC", "执行预测逻辑", module="decision")
-            time.sleep(0.02)
-            logger.debug("EXECUTOR_LOGIC", "预测逻辑完成", module="decision")
-        elif action.action_type == ActionType.LEARN:
-            logger.info("EXECUTOR_LOGIC", "执行学习逻辑", module="decision")
-            time.sleep(0.03)
-            logger.debug("EXECUTOR_LOGIC", "学习逻辑完成", module="decision")
+
+        elif at == ActionType.REDUCE_COLLECT_FREQ:
+            # 真实降低采集频率：通过回调通知perception模块
+            cb = self._callbacks.get("reduce_freq")
+            if cb:
+                cb(action.params)
+                logger.info("EXECUTOR_LOGIC", "采集频率降低回调已执行", module="decision")
+            else:
+                logger.info("EXECUTOR_LOGIC", "采集频率降低：无回调，记录意图", module="decision")
+
+        elif at == ActionType.RELEASE_RESOURCES:
+            # 真实释放资源：清理Python gc + 释放adapter历史
+            import gc
+            collected = gc.collect()
+            if self.adapter and hasattr(self.adapter, "execution_history"):
+                # 保留最近50条执行历史
+                if len(self.adapter.execution_history) > 50:
+                    self.adapter.execution_history = self.adapter.execution_history[-50:]
+            logger.info("EXECUTOR_LOGIC", f"资源释放完成: gc回收{collected}个对象", module="decision")
+
+        elif at == ActionType.PREDICT:
+            cb = self._callbacks.get("predict")
+            if cb:
+                result = cb(action.params)
+                logger.info("EXECUTOR_LOGIC", f"预测回调已执行: {result}", module="decision")
+            else:
+                logger.info("EXECUTOR_LOGIC", "预测：无回调，记录意图", module="decision")
+
+        elif at == ActionType.LEARN:
+            cb = self._callbacks.get("learn")
+            if cb:
+                cb(action.params)
+                logger.info("EXECUTOR_LOGIC", "在线学习回调已执行", module="decision")
+            else:
+                logger.info("EXECUTOR_LOGIC", "在线学习：无回调，记录意图", module="decision")
+
+        elif at == ActionType.CLEAN_CACHE:
+            self._execute_clean_cache(action)
+
+        elif at == ActionType.RESTART_SERVICE:
+            self._execute_restart_service(action)
+
+        elif at == ActionType.ALERT_NOTIFY:
+            self._execute_alert_notify(action)
+
+        elif at == ActionType.KILL_PROCESS:
+            self._execute_kill_process(action)
+
         else:
             logger.warning("EXECUTOR_LOGIC", f"未知动作类型: {action.action_type.name}", module="decision")
 
         logger.info("EXECUTOR_LOGIC", f"动作逻辑执行完毕: {action.name}", module="decision")
+
+    # ===== H1新增：真实运维动作执行方法 =====
+
+    def _execute_clean_cache(self, action: Action) -> None:
+        """清理缓存：删除临时文件、调用包管理器缓存清理"""
+        targets = action.params.get("targets", self.DEFAULT_CLEAN_CACHE_TARGETS)
+        total_freed = 0
+
+        # 1. 清理Agent自身临时缓存文件
+        import glob
+        for pattern in targets:
+            for filepath in glob.glob(pattern):
+                try:
+                    size = os.path.getsize(filepath)
+                    os.remove(filepath)
+                    total_freed += size
+                    logger.debug("EXECUTOR_LOGIC", f"删除缓存文件: {filepath} ({size}B)", module="decision")
+                except OSError as e:
+                    logger.warning("EXECUTOR_LOGIC", f"删除缓存文件失败 {filepath}: {e}", module="decision")
+
+        # 2. 清理Python临时目录中的agent缓存
+        tmp_dir = tempfile.gettempdir()
+        for entry in os.listdir(tmp_dir):
+            if entry.startswith("agent_cache_"):
+                entry_path = os.path.join(tmp_dir, entry)
+                try:
+                    if os.path.isfile(entry_path):
+                        size = os.path.getsize(entry_path)
+                        os.remove(entry_path)
+                        total_freed += size
+                    elif os.path.isdir(entry_path):
+                        dir_size = sum(
+                            os.path.getsize(os.path.join(dp, f))
+                            for dp, _, fns in os.walk(entry_path)
+                            for f in fns
+                        )
+                        shutil.rmtree(entry_path)
+                        total_freed += dir_size
+                except OSError as e:
+                    logger.warning("EXECUTOR_LOGIC", f"清理临时目录失败 {entry}: {e}", module="decision")
+
+        # 3. 通过adapter调用系统缓存清理命令（白名单：pip cache）
+        if self.adapter:
+            try:
+                result = self.adapter.execute_command("pip cache purge")
+                if result.get("success"):
+                    logger.info("EXECUTOR_LOGIC", "pip缓存清理完成", module="decision")
+                else:
+                    logger.debug("EXECUTOR_LOGIC", f"pip缓存清理跳过: {result.get('stderr', '')[:100]}", module="decision")
+            except Exception as e:
+                logger.debug("EXECUTOR_LOGIC", f"pip缓存清理异常(可忽略): {e}", module="decision")
+
+        self.total_cache_cleaned_bytes += total_freed
+        logger.info("EXECUTOR_LOGIC",
+                    f"缓存清理完成: 释放 {total_freed / 1024:.1f}KB, 累计 {self.total_cache_cleaned_bytes / 1024:.1f}KB",
+                    module="decision")
+
+    def _execute_restart_service(self, action: Action) -> None:
+        """重启服务：通过systemctl/docker restart，受白名单约束"""
+        service_name = action.params.get("service", "")
+        method = action.params.get("method", "systemctl")  # systemctl | docker
+
+        if not service_name:
+            logger.warning("EXECUTOR_LOGIC", "重启服务：未指定服务名", module="decision")
+            return
+
+        # 安全校验：白名单检查
+        if self.allowed_services and service_name not in self.allowed_services:
+            logger.error("EXECUTOR_LOGIC",
+                        f"拒绝重启未授权服务: {service_name} (白名单: {self.allowed_services})",
+                        module="decision")
+            return
+
+        if not self.adapter:
+            logger.warning("EXECUTOR_LOGIC", "无适配器，无法重启服务", module="decision")
+            return
+
+        # 构造命令（白名单约束method）
+        if method == "docker":
+            cmd = f"docker restart {service_name}"
+        elif method == "systemctl":
+            cmd = f"systemctl restart {service_name}"
+        else:
+            logger.error("EXECUTOR_LOGIC", f"未知重启方法: {method}", module="decision")
+            return
+
+        logger.info("EXECUTOR_LOGIC", f"执行服务重启: {cmd}", module="decision")
+        result = self.adapter.execute_command(cmd)
+        if result.get("success"):
+            logger.info("EXECUTOR_LOGIC", f"服务重启成功: {service_name}", module="decision")
+        else:
+            logger.error("EXECUTOR_LOGIC",
+                        f"服务重启失败: {service_name}, rc={result.get('returncode')}, err={result.get('stderr', '')[:200]}",
+                        module="decision")
+
+    def _execute_alert_notify(self, action: Action) -> None:
+        """告警通知：通过adapter发送HTTP回调到外部告警系统"""
+        webhook_url = action.params.get("webhook_url", "")
+        message = action.params.get("message", f"Agent告警: {action.name}")
+        level = action.params.get("level", "warning")
+
+        if not webhook_url:
+            # 无webhook时，通过回调通知alerting模块
+            cb = self._callbacks.get("alert")
+            if cb:
+                cb({"message": message, "level": level})
+                logger.info("EXECUTOR_LOGIC", f"告警回调已触发: {message}", module="decision")
+            else:
+                logger.warning("EXECUTOR_LOGIC", f"告警无webhook无回调，仅记录: {message}", module="decision")
+            return
+
+        if not self.adapter:
+            logger.warning("EXECUTOR_LOGIC", "无适配器，无法发送HTTP告警", module="decision")
+            return
+
+        payload = {"message": message, "level": level, "timestamp": time.time(), "source": "self_evolving_agent"}
+        result = self.adapter.execute_http(webhook_url, payload)
+        if result.get("success"):
+            logger.info("EXECUTOR_LOGIC", f"告警HTTP通知成功: {webhook_url}", module="decision")
+        else:
+            logger.error("EXECUTOR_LOGIC", f"告警HTTP通知失败: {result.get('error', '')}", module="decision")
+
+    def _execute_kill_process(self, action: Action) -> None:
+        """终止高资源占用进程：受白名单约束，只kill匹配的进程名"""
+        pattern = action.params.get("pattern", "")
+        if not pattern:
+            logger.warning("EXECUTOR_LOGIC", "终止进程：未指定进程名模式", module="decision")
+            return
+
+        # 安全校验：白名单检查
+        if self.allowed_kill_patterns and pattern not in self.allowed_kill_patterns:
+            logger.error("EXECUTOR_LOGIC",
+                        f"拒绝终止未授权进程: {pattern} (白名单: {self.allowed_kill_patterns})",
+                        module="decision")
+            return
+
+        killed = 0
+        for proc in psutil.process_iter(["pid", "name", "cpu_percent"]):
+            try:
+                if pattern.lower() in proc.info["name"].lower():
+                    # 排除自身进程
+                    if proc.info["pid"] == os.getpid():
+                        continue
+                    proc.terminate()
+                    killed += 1
+                    logger.info("EXECUTOR_LOGIC", f"已终止进程: {proc.info['name']}(pid={proc.info['pid']})", module="decision")
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        logger.info("EXECUTOR_LOGIC", f"进程终止完成: 共终止 {killed} 个匹配 '{pattern}' 的进程", module="decision")
+
+    def register_callback(self, name: str, callback: Callable) -> None:
+        """注册动作回调（供main.py注入真实模块方法）"""
+        self._callbacks[name] = callback
+        logger.debug("EXECUTOR_INIT", f"回调注册: {name}", module="decision")
 
     @log_execution
     def get_execution_stats(self) -> Dict[str, Any]:

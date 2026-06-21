@@ -113,7 +113,7 @@ def get_default_registry() -> ModuleRegistry:
         # 注册所有内置默认模块
         from modules.perception import EnvironmentPerception
         from modules.drive_engine import DriveEngine
-        from modules.prediction import PredictionEngine
+        from modules.prediction import PredictionEngine, EnhancedPredictionEngine
         from modules.decision import DecisionEngine
         from modules.error_eval import ErrorEvaluator
         from modules.optimizer import Optimizer
@@ -122,6 +122,7 @@ def get_default_registry() -> ModuleRegistry:
         _default_registry.register_perception("default", EnvironmentPerception)
         _default_registry.register_drive_engine("default", DriveEngine)
         _default_registry.register_prediction("default", PredictionEngine)
+        _default_registry.register_prediction("enhanced", EnhancedPredictionEngine)  # H4
         _default_registry.register_decision("default", DecisionEngine)
         _default_registry.register_error_eval("default", ErrorEvaluator)
         _default_registry.register_optimizer("default", Optimizer)

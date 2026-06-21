@@ -3,16 +3,18 @@
 支持热更新，所有配置变更记录审计日志
 """
 import os
+import sys
 import yaml
 import json
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-# 导入日志模块
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# O6：统一sys.path策略 —— 仅在直接运行时添加路径（避免import副作用）
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.logger import logger, log_execution
+from core.exceptions import ConfigurationException
 
 
 @dataclass
@@ -44,13 +46,34 @@ class ResourceConstraints:
     storage_retain_ratio: float = 0.30
     
     def validate(self) -> bool:
-        """验证约束参数的合法性"""
+        """验证约束参数的合法性
+
+        U5：使用 ConfigurationException 替代 assert ——
+        assert 可被 python -O 禁用且错误信息不友好；配置错误是不可降级的，
+        必须抛出带上下文的类型化异常，让用户明确知道哪里错了、如何修。
+        """
         logger.debug("CONFIG_VALIDATE", "验证资源约束配置", module="config",
                     extra={"cpu": self.max_cpu_percent, "mem": self.max_memory_percent})
-        assert 0 < self.max_cpu_percent <= 100, "CPU 约束必须在 0-100 之间"
-        assert 0 < self.max_memory_percent <= 100, "内存约束必须在 0-100 之间"
-        assert self.max_reconstruction_iterations > 0, "重构迭代次数必须大于 0"
-        assert 0 < self.storage_retain_ratio <= 1.0, "存储保留比例必须在 0-1 之间"
+        if not (0 < self.max_cpu_percent <= 100):
+            raise ConfigurationException(
+                f"CPU 约束必须在 0-100 之间，当前为 {self.max_cpu_percent}",
+                context={"field": "max_cpu_percent", "value": self.max_cpu_percent},
+            )
+        if not (0 < self.max_memory_percent <= 100):
+            raise ConfigurationException(
+                f"内存约束必须在 0-100 之间，当前为 {self.max_memory_percent}",
+                context={"field": "max_memory_percent", "value": self.max_memory_percent},
+            )
+        if self.max_reconstruction_iterations <= 0:
+            raise ConfigurationException(
+                f"重构迭代次数必须大于 0，当前为 {self.max_reconstruction_iterations}",
+                context={"field": "max_reconstruction_iterations", "value": self.max_reconstruction_iterations},
+            )
+        if not (0 < self.storage_retain_ratio <= 1.0):
+            raise ConfigurationException(
+                f"存储保留比例必须在 0-1 之间，当前为 {self.storage_retain_ratio}",
+                context={"field": "storage_retain_ratio", "value": self.storage_retain_ratio},
+            )
         logger.info("CONFIG_VALIDATE", "资源约束配置验证通过", module="config")
         return True
 
@@ -84,8 +107,18 @@ class SafetyConstraints:
     
     def validate(self) -> bool:
         logger.debug("CONFIG_VALIDATE", "验证行为安全约束配置", module="config")
-        assert self.max_consecutive_exploration_failures > 0
-        assert 0 < self.performance_degradation_threshold < 1.0
+        if self.max_consecutive_exploration_failures <= 0:
+            raise ConfigurationException(
+                f"最大连续探索失败次数必须大于 0，当前为 {self.max_consecutive_exploration_failures}",
+                context={"field": "max_consecutive_exploration_failures",
+                         "value": self.max_consecutive_exploration_failures},
+            )
+        if not (0 < self.performance_degradation_threshold < 1.0):
+            raise ConfigurationException(
+                f"性能退化阈值必须在 0-1 之间（开区间），当前为 {self.performance_degradation_threshold}",
+                context={"field": "performance_degradation_threshold",
+                         "value": self.performance_degradation_threshold},
+            )
         logger.info("CONFIG_VALIDATE", "行为安全约束配置验证通过", module="config")
         return True
 
@@ -120,8 +153,17 @@ class EvolutionConstraints:
     
     def validate(self) -> bool:
         logger.debug("CONFIG_VALIDATE", "验证进化节奏约束配置", module="config")
-        assert 0 <= self.exploration_ratio <= 1.0
-        assert self.idle_replay_interval_hours > 0
+        if not (0 <= self.exploration_ratio <= 1.0):
+            raise ConfigurationException(
+                f"探索比例必须在 0-1 之间，当前为 {self.exploration_ratio}",
+                context={"field": "exploration_ratio", "value": self.exploration_ratio},
+            )
+        if self.idle_replay_interval_hours <= 0:
+            raise ConfigurationException(
+                f"离线复盘间隔必须大于 0，当前为 {self.idle_replay_interval_hours}",
+                context={"field": "idle_replay_interval_hours",
+                         "value": self.idle_replay_interval_hours},
+            )
         logger.info("CONFIG_VALIDATE", "进化节奏约束配置验证通过", module="config")
         return True
 
@@ -155,18 +197,96 @@ class DriveWeights:
     safe: float = 0.4
     gain: float = 0.4
     eff: float = 0.2
-    
+
     def validate(self) -> bool:
         logger.debug("CONFIG_VALIDATE", "验证驱力权重配置", module="config",
                     extra={"safe": self.safe, "gain": self.gain, "eff": self.eff})
         total = self.safe + self.gain + self.eff
-        assert abs(total - 1.0) < 1e-6, f"驱力权重之和必须等于 1.0，当前为 {total}"
-        assert all(0 <= w <= 1.0 for w in [self.safe, self.gain, self.eff])
+        if abs(total - 1.0) >= 1e-6:
+            raise ConfigurationException(
+                f"驱力权重之和必须等于 1.0，当前为 {total}",
+                context={"safe": self.safe, "gain": self.gain, "eff": self.eff, "total": total},
+            )
+        for name, w in [("safe", self.safe), ("gain", self.gain), ("eff", self.eff)]:
+            if not (0 <= w <= 1.0):
+                raise ConfigurationException(
+                    f"驱力权重 {name} 必须在 0-1 之间，当前为 {w}",
+                    context={"field": name, "value": w},
+                )
         logger.info("CONFIG_VALIDATE", "驱力权重配置验证通过", module="config")
         return True
-    
+
     def to_dict(self) -> Dict[str, float]:
         return {"safe": self.safe, "gain": self.gain, "eff": self.eff}
+
+
+@dataclass
+class LoggingConfig:
+    """H6：日志与性能监控配置 —— 控制日志输出级别和噪声
+
+    第一性原理：
+    1. 日志是给人看的，级别应匹配场景（生产INFO/开发DEBUG）
+    2. 高频低价值日志应采样，避免淹没关键信息
+    3. 函数追踪开销大，生产环境应关闭
+
+    Attributes:
+        console_level: 控制台日志级别。默认 "INFO"
+        file_level: 文件日志级别。默认 "DEBUG"（保留排查细节）
+        func_trace_enabled: 是否启用函数进入/退出追踪。默认 False（生产静默）
+        sample_rates: 事件采样率映射 {event_type: every_n}。默认对FUNC_ENTER/FUNC_EXIT每10次记1次
+        perf_monitor_enabled: 是否启用性能监控。默认 True
+        perf_slow_threshold_sec: 慢操作阈值（秒）。默认 0.1
+        perf_report_interval_loops: 每隔多少轮主循环输出性能报告。0=不输出。默认 100
+    """
+    console_level: str = "INFO"
+    file_level: str = "DEBUG"
+    func_trace_enabled: bool = False
+    sample_rates: Dict[str, int] = field(default_factory=lambda: {
+        "FUNC_ENTER": 10,
+        "FUNC_EXIT": 10,
+    })
+    perf_monitor_enabled: bool = True
+    perf_slow_threshold_sec: float = 0.1
+    perf_report_interval_loops: int = 100
+
+    def validate(self) -> bool:
+        logger.debug("CONFIG_VALIDATE", "验证日志配置", module="config")
+        valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        if self.console_level.upper() not in valid_levels:
+            raise ConfigurationException(
+                f"console_level 非法: {self.console_level}，合法值: {valid_levels}",
+                context={"field": "console_level", "value": self.console_level},
+            )
+        if self.file_level.upper() not in valid_levels:
+            raise ConfigurationException(
+                f"file_level 非法: {self.file_level}，合法值: {valid_levels}",
+                context={"field": "file_level", "value": self.file_level},
+            )
+        if self.perf_slow_threshold_sec < 0:
+            raise ConfigurationException(
+                f"慢操作阈值不能为负，当前为 {self.perf_slow_threshold_sec}",
+                context={"field": "perf_slow_threshold_sec",
+                         "value": self.perf_slow_threshold_sec},
+            )
+        if self.perf_report_interval_loops < 0:
+            raise ConfigurationException(
+                f"报告间隔不能为负，当前为 {self.perf_report_interval_loops}",
+                context={"field": "perf_report_interval_loops",
+                         "value": self.perf_report_interval_loops},
+            )
+        logger.info("CONFIG_VALIDATE", "日志配置验证通过", module="config")
+        return True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "console_level": self.console_level,
+            "file_level": self.file_level,
+            "func_trace_enabled": self.func_trace_enabled,
+            "sample_rates": dict(self.sample_rates),
+            "perf_monitor_enabled": self.perf_monitor_enabled,
+            "perf_slow_threshold_sec": self.perf_slow_threshold_sec,
+            "perf_report_interval_loops": self.perf_report_interval_loops,
+        }
 
 
 @dataclass
@@ -209,6 +329,7 @@ class SystemConfig:
     safety: SafetyConstraints = field(default_factory=SafetyConstraints)
     evolution: EvolutionConstraints = field(default_factory=EvolutionConstraints)
     drive_weights: DriveWeights = field(default_factory=DriveWeights)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     perception_interval: float = 1.0
     decision_interval: float = 1.0
     model_snapshot_dir: str = "./data/snapshots"
@@ -223,11 +344,24 @@ class SystemConfig:
         self.safety.validate()
         self.evolution.validate()
         self.drive_weights.validate()
-        assert self.perception_interval > 0
-        assert self.decision_interval > 0
-        assert self.main_loop_frequency > 0
+        self.logging.validate()
+        if self.perception_interval <= 0:
+            raise ConfigurationException(
+                f"感知间隔必须大于 0，当前为 {self.perception_interval}",
+                context={"field": "perception_interval", "value": self.perception_interval},
+            )
+        if self.decision_interval <= 0:
+            raise ConfigurationException(
+                f"决策间隔必须大于 0，当前为 {self.decision_interval}",
+                context={"field": "decision_interval", "value": self.decision_interval},
+            )
+        if self.main_loop_frequency <= 0:
+            raise ConfigurationException(
+                f"主循环频率必须大于 0，当前为 {self.main_loop_frequency}",
+                context={"field": "main_loop_frequency", "value": self.main_loop_frequency},
+            )
         os.makedirs(self.model_snapshot_dir, exist_ok=True)
-        os.makedirs(os.path.dirname(self.database_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.database_path) or ".", exist_ok=True)
         logger.info("CONFIG_VALIDATE", "全部系统配置验证通过", module="config")
         return True
     
@@ -237,6 +371,7 @@ class SystemConfig:
             "safety": asdict(self.safety),
             "evolution": asdict(self.evolution),
             "drive_weights": self.drive_weights.to_dict(),
+            "logging": self.logging.to_dict(),
             "perception_interval": self.perception_interval,
             "decision_interval": self.decision_interval,
             "model_snapshot_dir": self.model_snapshot_dir,
@@ -275,72 +410,179 @@ class ConfigManager:
     
     @log_execution
     def load(self) -> SystemConfig:
-        """加载配置文件"""
+        """加载配置文件
+
+        U5：配置加载失败拒绝启动（第一性原理——配置是契约）。
+        - 配置文件不存在：可接受，使用默认配置（仅警告）。
+        - YAML 语法错误：不可接受，抛出 ConfigurationException 拒绝启动，
+          避免静默降级到默认值导致行为偏离用户预期。
+        - 配置项非法：由 validate() 抛出 ConfigurationException。
+        环境变量覆盖优先级最高：文件加载后再应用环境变量。
+        """
         logger.info("CONFIG_LOAD", f"尝试加载配置文件: {self.config_path}", module="config")
-        
+
         if not os.path.exists(self.config_path):
             logger.warning("CONFIG_LOAD", "配置文件不存在，使用默认配置", module="config",
                           extra={"config_path": self.config_path})
+            self._apply_env_overrides()
             self._config.validate()
             return self._config
-        
+
         try:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f)
-            
+
             logger.debug("CONFIG_LOAD", "配置文件解析成功", module="config",
                         extra={"keys": list(data.keys()) if data else []})
-            
+
             # 更新配置
             if data:
+                if not isinstance(data, dict):
+                    raise ConfigurationException(
+                        f"配置文件顶层必须是字典，当前为 {type(data).__name__}",
+                        context={"config_path": self.config_path, "got_type": type(data).__name__},
+                    )
                 self._update_from_dict(data)
-            
+
+            # U5：环境变量覆盖（优先级高于配置文件）
+            self._apply_env_overrides()
+
             self._config.validate()
             self._last_modified = os.path.getmtime(self.config_path)
-            
+
             logger.info("CONFIG_LOAD", "配置文件加载成功", module="config",
                        extra={"config_path": self.config_path})
-            
+
+        except ConfigurationException:
+            # 配置异常不可降级，直接向上抛出拒绝启动
+            raise
+        except yaml.YAMLError as e:
+            # YAML 语法错误：拒绝启动，不静默降级
+            logger.error("CONFIG_LOAD", f"配置文件YAML语法错误，拒绝启动: {e}", module="config",
+                        extra={"config_path": self.config_path, "error": str(e)})
+            raise ConfigurationException(
+                f"配置文件YAML语法错误: {e}",
+                context={"config_path": self.config_path, "yaml_error": str(e)},
+            )
         except Exception as e:
-            logger.error("CONFIG_LOAD", f"配置文件加载失败: {str(e)}", module="config",
+            # 其他IO或未知错误：拒绝启动
+            logger.error("CONFIG_LOAD", f"配置文件加载失败，拒绝启动: {e}", module="config",
                         extra={"error": str(e)})
-            # 使用默认配置
-            self._config.validate()
-        
+            raise ConfigurationException(
+                f"配置文件加载失败: {e}",
+                context={"config_path": self.config_path, "error": str(e)},
+            )
+
         return self._config
+
+    def _apply_env_overrides(self) -> None:
+        """U5：应用环境变量覆盖
+
+        第一性原理：环境变量 > 配置文件 > 默认值。
+        环境变量是部署时的契约，应优先于文件配置。
+        支持的环境变量（与 config_center.EnvironmentOverride 对齐）：
+        - AGENT_MAX_CPU: 资源CPU上限
+        - AGENT_MAX_MEMORY: 资源内存上限
+        - AGENT_EXPLORATION_RATIO: 探索比例
+        - AGENT_PERCEPTION_INTERVAL: 感知间隔
+        - AGENT_DECISION_INTERVAL: 决策间隔
+        - AGENT_LOOP_FREQUENCY: 主循环频率
+        - AGENT_LOG_DIR: 日志目录
+        - AGENT_DB_PATH: 数据库路径
+        - AGENT_SNAPSHOT_DIR: 快照目录
+        - AGENT_LOG_LEVEL: 日志级别（console_level）
+        """
+        _ENV_MAPPING = {
+            "AGENT_MAX_CPU": ("resource", "max_cpu_percent", float),
+            "AGENT_MAX_MEMORY": ("resource", "max_memory_percent", float),
+            "AGENT_MAX_RECONSTRUCT": ("resource", "max_reconstruction_iterations", int),
+            "AGENT_STORAGE_RETAIN": ("resource", "storage_retain_ratio", float),
+            "AGENT_EXPLORATION_RATIO": ("evolution", "exploration_ratio", float),
+            "AGENT_REPLAY_INTERVAL": ("evolution", "idle_replay_interval_hours", float),
+            "AGENT_SAFE_WEIGHT": ("drive_weights", "safe", float),
+            "AGENT_GAIN_WEIGHT": ("drive_weights", "gain", float),
+            "AGENT_EFF_WEIGHT": ("drive_weights", "eff", float),
+            "AGENT_PERCEPTION_INTERVAL": (None, "perception_interval", float),
+            "AGENT_DECISION_INTERVAL": (None, "decision_interval", float),
+            "AGENT_LOOP_FREQUENCY": (None, "main_loop_frequency", float),
+            "AGENT_SNAPSHOT_DIR": (None, "model_snapshot_dir", str),
+            "AGENT_DB_PATH": (None, "database_path", str),
+            "AGENT_LOG_DIR": (None, "log_dir", str),
+            "AGENT_LOG_LEVEL": ("logging", "console_level", str),
+        }
+
+        for env_key, (sub_cfg, field_name, caster) in _ENV_MAPPING.items():
+            raw = os.environ.get(env_key)
+            if raw is None:
+                continue
+            try:
+                value = caster(raw)
+            except (ValueError, TypeError) as e:
+                raise ConfigurationException(
+                    f"环境变量 {env_key}={raw!r} 无法转换为 {caster.__name__}: {e}",
+                    context={"env_key": env_key, "raw_value": raw, "caster": caster.__name__},
+                )
+            target = self._config if sub_cfg is None else getattr(self._config, sub_cfg)
+            setattr(target, field_name, value)
+            logger.info("CONFIG_ENV", f"环境变量覆盖: {env_key}={value}", module="config")
     
     def _update_from_dict(self, data: Dict[str, Any]):
-        """从字典更新配置"""
-        if "resource" in data:
-            for k, v in data["resource"].items():
+        """从字典更新配置
+
+        支持别名映射，使场景配置（scenarios.yaml）与主配置（agent.yaml）键名兼容：
+        - resource_constraints → resource
+        - safety_constraints → safety
+        - evolution_constraints → evolution
+        """
+        # 键名别名映射：场景配置使用 _constraints 后缀，主配置使用简短名
+        ALIAS = {
+            "resource_constraints": "resource",
+            "safety_constraints": "safety",
+            "evolution_constraints": "evolution",
+        }
+        normalized = {}
+        for k, v in data.items():
+            normalized[ALIAS.get(k, k)] = v
+
+        if "resource" in normalized:
+            for k, v in normalized["resource"].items():
                 if hasattr(self._config.resource, k):
                     setattr(self._config.resource, k, v)
                     logger.debug("CONFIG_UPDATE", f"更新资源约束: {k}={v}", module="config")
-        
-        if "safety" in data:
-            for k, v in data["safety"].items():
+
+        if "safety" in normalized:
+            for k, v in normalized["safety"].items():
                 if hasattr(self._config.safety, k):
                     setattr(self._config.safety, k, v)
                     logger.debug("CONFIG_UPDATE", f"更新安全约束: {k}={v}", module="config")
-        
-        if "evolution" in data:
-            for k, v in data["evolution"].items():
+
+        if "evolution" in normalized:
+            for k, v in normalized["evolution"].items():
                 if hasattr(self._config.evolution, k):
                     setattr(self._config.evolution, k, v)
                     logger.debug("CONFIG_UPDATE", f"更新进化约束: {k}={v}", module="config")
-        
-        if "drive_weights" in data:
-            for k, v in data["drive_weights"].items():
+
+        if "drive_weights" in normalized:
+            for k, v in normalized["drive_weights"].items():
                 if hasattr(self._config.drive_weights, k):
                     setattr(self._config.drive_weights, k, v)
                     logger.debug("CONFIG_UPDATE", f"更新驱力权重: {k}={v}", module="config")
-        
+
+        # H6: 日志与性能监控配置
+        if "logging" in normalized:
+            log_data = normalized["logging"]
+            if isinstance(log_data, dict):
+                for k, v in log_data.items():
+                    if hasattr(self._config.logging, k):
+                        setattr(self._config.logging, k, v)
+                        logger.debug("CONFIG_UPDATE", f"更新日志配置: {k}={v}", module="config")
+
         # 更新其他字段
         for field_name in ["perception_interval", "decision_interval", "main_loop_frequency",
                           "model_snapshot_dir", "database_path", "log_dir"]:
-            if field_name in data:
-                setattr(self._config, field_name, data[field_name])
-                logger.debug("CONFIG_UPDATE", f"更新配置项: {field_name}={data[field_name]}", module="config")
+            if field_name in normalized:
+                setattr(self._config, field_name, normalized[field_name])
+                logger.debug("CONFIG_UPDATE", f"更新配置项: {field_name}={normalized[field_name]}", module="config")
     
     @property
     def config(self) -> SystemConfig:
